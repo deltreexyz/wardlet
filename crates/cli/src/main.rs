@@ -1,5 +1,6 @@
 //! The `wardlet` command. Parsing lives here. Crypto lives in `wardlet-core`.
 
+mod debug;
 mod fido;
 
 use std::io::{self, Write};
@@ -26,6 +27,10 @@ struct Cli {
     /// Enroll a passphrase user. A copied disk can be guessed offline.
     #[arg(long, global = true)]
     passphrase: bool,
+
+    /// Print each step, including the master key when a vault is created.
+    #[arg(long, global = true)]
+    debug: bool,
 
     #[command(subcommand)]
     command: Command,
@@ -96,6 +101,15 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<(), Error> {
+    debug::set(cli.debug);
+    debug::log(&format!(
+        "starting {}{}",
+        command_name(&cli.command),
+        cli.dir
+            .as_ref()
+            .map(|dir| format!(" --dir {}", dir.display()))
+            .unwrap_or_default()
+    ));
     match cli.command {
         Command::Version => {
             println!("wardlet {}", env!("CARGO_PKG_VERSION"));
@@ -113,6 +127,7 @@ fn run(cli: Cli) -> Result<(), Error> {
 
 fn init(dir: Option<PathBuf>, passphrase: bool, show_banner: bool) -> Result<(), Error> {
     let dir = vault_dir(dir)?;
+    debug::log(&format!("vault directory {}", dir.display()));
     if show_banner {
         print_banner();
     }
@@ -124,6 +139,7 @@ fn init(dir: Option<PathBuf>, passphrase: bool, show_banner: bool) -> Result<(),
         warn_passphrase_is_guessable();
         let mut typed = prompt_new_passphrase()?;
         eprintln!("Wrapping the master key. This takes about a second.");
+        debug::log("creating a passphrase vault");
         let created = vault::init_vault(&dir, &label, &typed);
         typed.zeroize();
         let mut created = created?;
@@ -136,7 +152,9 @@ fn init(dir: Option<PathBuf>, passphrase: bool, show_banner: bool) -> Result<(),
         return Ok(());
     }
 
+    debug::log("enrolling the first FIDO2 key");
     let mut enrolled = fido::enroll_hardware_member(&label)?;
+    debug::log("writing the vault and the recovery wrapper");
     let created = vault::init_hardware_vault(&dir, &label, &enrolled.hmac, &enrolled.params);
     let mut created = created?;
     print_recovery_code(&created.recovery_code);
@@ -167,8 +185,10 @@ fn offer_more_hardware_keys(dir: &std::path::Path, master_secret: &str) -> Resul
     loop {
         println!();
         if !prompt_yes("Add another FIDO2 key to the vault?") {
+            debug::log("finished adding keys");
             break;
         }
+        debug::log("enrolling another FIDO2 key");
         let label = prompt_key_name("Label for the new key")?;
         let mut enrolled = fido::enroll_hardware_member(&label)?;
         let added = vault::add_hardware_member_unlocked(
@@ -243,6 +263,7 @@ fn keys(dir: Option<PathBuf>, json: bool) -> Result<(), Error> {
 }
 
 fn add_user(dir: &std::path::Path, passphrase: bool) -> Result<(), Error> {
+    debug::log("adding a key");
     println!("Adding a key has two steps.");
     println!("1. Unlock the vault with a key that is already enrolled.");
     let master = unlock_existing(dir, passphrase)?;
@@ -253,6 +274,7 @@ fn add_user(dir: &std::path::Path, passphrase: bool) -> Result<(), Error> {
         warn_passphrase_is_guessable();
         let mut new_passphrase = prompt_new_passphrase()?;
         eprintln!("Wrapping the master key. This takes about a second.");
+        debug::log("wrapping the master for a passphrase user");
         let added = vault::add_passphrase_member_unlocked(dir, &master, &label, &new_passphrase);
         new_passphrase.zeroize();
         let added = added?;
@@ -260,7 +282,9 @@ fn add_user(dir: &std::path::Path, passphrase: bool) -> Result<(), Error> {
         return Ok(());
     }
 
+    debug::log("enrolling the new FIDO2 key");
     let mut enrolled = fido::enroll_hardware_member(&label)?;
+    debug::log("writing the new key wrapper");
     let added =
         vault::add_hardware_member_unlocked(dir, &master, &label, &enrolled.hmac, &enrolled.params);
     enrolled.hmac.zeroize();
@@ -279,6 +303,7 @@ fn add_user(dir: &std::path::Path, passphrase: bool) -> Result<(), Error> {
 fn recover(dir: Option<PathBuf>) -> Result<(), Error> {
     let dir = vault_dir(dir)?;
     print_banner();
+    debug::log("unlocking with the recovery code");
     let mut typed = prompt_line("Recovery code")?;
     let master = vault::unlock_with_recovery_code(&dir, &typed);
     typed.zeroize();
@@ -290,6 +315,7 @@ fn recover(dir: Option<PathBuf>) -> Result<(), Error> {
 }
 
 fn replace_recovery_code(dir: &std::path::Path, master: &Master) -> Result<(), Error> {
+    debug::log("staging a replacement recovery wrapper");
     eprintln!("Wrapping a new recovery code. This takes about a second.");
     let (mut display, bytes) = vault::stage_recovery_wrapper(master)?;
     print_recovery_code(&display);
@@ -297,6 +323,7 @@ fn replace_recovery_code(dir: &std::path::Path, master: &Master) -> Result<(), E
     display.zeroize();
     clear_screen();
     if saved {
+        debug::log("replacing the recovery wrapper");
         vault::commit_recovery_wrapper(dir, &bytes)?;
         println!("The previous recovery code no longer unlocks this vault.");
     } else {
@@ -372,6 +399,7 @@ fn remove_user(dir: &std::path::Path, passphrase: bool) -> Result<(), Error> {
         );
         return Ok(());
     }
+    debug::log("removing a key");
     println!("Unlock an enrolled key to authorize the removal.");
     let master = unlock_existing(dir, passphrase)?;
     println!("Vault unlocked.");
@@ -408,9 +436,11 @@ fn unlock_existing(dir: &std::path::Path, passphrase: bool) -> Result<Master, Er
     let has_pass = vault::has_passphrase_member(dir)?;
     let has_hw = vault::has_hardware_member(dir)?;
     if has_hw && !(passphrase && has_pass) {
+        debug::log("unlocking with a FIDO2 key");
         return fido::unlock_vault_with_hardware(dir);
     }
     if has_pass {
+        debug::log("unlocking with a passphrase");
         let mut typed = prompt_existing_passphrase()?;
         let master = vault::unlock_with_passphrase(dir, &typed);
         typed.zeroize();
@@ -423,19 +453,32 @@ fn warn_passphrase_is_guessable() {
     eprintln!("A copied disk can be guessed from this passphrase.");
 }
 
+fn command_name(command: &Command) -> &'static str {
+    match command {
+        Command::Init => "init",
+        Command::Config => "config",
+        Command::Enc { .. } => "enc",
+        Command::Dec { .. } => "dec",
+        Command::Status { .. } => "status",
+        Command::Keys { .. } => "keys",
+        Command::Recover => "recover",
+        Command::Version => "version",
+    }
+}
+
 fn print_debug_banner(master: Option<&str>, hmac: Option<&[u8; 32]>) {
-    if std::env::var_os("WARDLET_DEBUG_SECRETS").is_none() {
+    if !debug::enabled() {
         return;
     }
-    println!("--- debug (build only; not printed in the product) ---");
+    eprintln!("--- debug ---");
     if let Some(master) = master {
-        println!("master: {master}");
+        eprintln!("master: {master}");
     }
     if let Some(hmac) = hmac {
         let hex: String = hmac.iter().map(|byte| format!("{byte:02x}")).collect();
-        println!("hmac: {hex}");
+        eprintln!("hmac: {hex}");
     }
-    println!("---");
+    eprintln!("---");
 }
 
 fn vault_dir(dir: Option<PathBuf>) -> Result<PathBuf, Error> {

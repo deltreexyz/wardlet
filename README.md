@@ -10,6 +10,8 @@ Supported devices are listed at [wardlet.com/#devices](https://wardlet.com/#devi
 
 This is early. Creating a vault, enrolling and removing keys, and a recovery code work. Encrypting and decrypting files does not, yet.
 
+Removing a key deletes that key from this vault. An older copy of the vault still opens with the removed key.
+
 ## Build
 
 Rust 1.85 or newer.

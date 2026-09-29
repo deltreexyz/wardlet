@@ -13,6 +13,7 @@ use wardlet_core::master::Master;
 use wardlet_core::vault::{self, DEFAULT_RP_ID, HardwareMemberParams};
 use zeroize::Zeroize;
 
+use crate::debug;
 use crate::prompt_line;
 
 pub struct EnrolledHmac {
@@ -26,6 +27,9 @@ pub fn enroll_hardware_member(_user_label: &str) -> Result<EnrolledHmac, Error> 
     check_pin_protocol(&mut auth)?;
 
     eprintln!("Enrolling \"{_user_label}\" on {key_product}.");
+    debug::log(&format!(
+        "makeCredential on {key_product}, rp {DEFAULT_RP_ID}, uv option omitted"
+    ));
     let pin = prompt_pin_if_needed(&mut auth, &key_product)?;
     let pin_ref = pin.as_deref();
 
@@ -42,9 +46,14 @@ pub fn enroll_hardware_member(_user_label: &str) -> Result<EnrolledHmac, Error> 
     eprintln!("Touch {key_product} to create a credential for {_user_label}…");
     let (credential_id, public_key) =
         make_credential_without_uv(&mut auth, DEFAULT_RP_ID, &client_data_hash, pin_ref)?;
+    debug::log(&format!(
+        "credential created, id {} bytes",
+        credential_id.len()
+    ));
 
     rand::rngs::OsRng.fill_bytes(&mut client_data_hash);
 
+    debug::log("reading hmac-secret for the new credential");
     eprintln!("Touch {key_product} again to finish enrolling {_user_label}…");
     let req = HmacSecretRequest {
         rp_id: DEFAULT_RP_ID,
@@ -58,6 +67,7 @@ pub fn enroll_hardware_member(_user_label: &str) -> Result<EnrolledHmac, Error> 
     };
     let response = auth.get_hmac_secret(&req).map_err(map_ctap)?;
     let hmac = response.secret.0;
+    debug::log("hmac-secret received for the new credential");
 
     let mut pin = pin;
     if let Some(ref mut value) = pin {
@@ -80,6 +90,10 @@ pub fn enroll_hardware_member(_user_label: &str) -> Result<EnrolledHmac, Error> 
 /// Ask the key that already belongs to this user for hmac-secret.
 pub fn derive_hmac_for_unlock(params: &HardwareMemberParams) -> Result<[u8; 32], Error> {
     let devices = device::list_devices().map_err(map_ctap)?;
+    debug::log(&format!(
+        "found {} FIDO2 device(s) for unlock",
+        devices.len()
+    ));
     if devices.is_empty() {
         return Err(Error::HardwareKeyNotFound);
     }
@@ -101,6 +115,7 @@ pub fn derive_hmac_for_unlock(params: &HardwareMemberParams) -> Result<[u8; 32],
     let mut last_err = Error::Other(format!("{enrolled} did not unlock the vault"));
     for info in candidates {
         let product = device_product(&info);
+        debug::log(&format!("opening {product} for {enrolled}"));
         let mut auth = Authenticator::open(&info).map_err(map_ctap)?;
         check_pin_protocol(&mut auth)?;
         eprintln!("Unlock with {enrolled}.");
@@ -124,6 +139,7 @@ pub fn derive_hmac_for_unlock(params: &HardwareMemberParams) -> Result<[u8; 32],
         let response = match auth.get_hmac_secret(&req) {
             Ok(response) => response,
             Err(err) if is_no_credentials(&err) => {
+                debug::log(&format!("{product} has no credential for {enrolled}"));
                 last_err = Error::Other(format!(
                     "{product} does not hold {enrolled}. Touch the key named above"
                 ));
@@ -132,6 +148,7 @@ pub fn derive_hmac_for_unlock(params: &HardwareMemberParams) -> Result<[u8; 32],
             Err(err) => return Err(map_ctap(err)),
         };
         let hmac = response.secret.0;
+        debug::log("hmac-secret received");
         let mut pin = pin;
         if let Some(ref mut value) = pin {
             value.zeroize();
@@ -203,6 +220,18 @@ fn choose_enrolled_key(targets: Vec<HardwareMemberParams>) -> Result<HardwareMem
 
 fn open_selected_device() -> Result<(Authenticator, String), Error> {
     let devices = device::list_devices().map_err(map_ctap)?;
+    debug::log(&format!("found {} FIDO2 device(s)", devices.len()));
+    for device in &devices {
+        debug::log(&format!(
+            "device {} {:04x}:{:04x}",
+            device
+                .product_string
+                .as_deref()
+                .unwrap_or("FIDO2 authenticator"),
+            device.vendor_id,
+            device.product_id
+        ));
+    }
     if devices.is_empty() {
         return Err(Error::HardwareKeyNotFound);
     }
@@ -244,6 +273,12 @@ fn open_selected_device() -> Result<(Authenticator, String), Error> {
 
 fn check_pin_protocol(auth: &mut Authenticator) -> Result<(), Error> {
     let info = auth.info().map_err(map_ctap)?;
+    debug::log(&format!(
+        "hmac-secret {}, client PIN {}, pin protocol v1 {}",
+        info.hmac_secret(),
+        info.client_pin_set(),
+        info.supports_pin_protocol_v1()
+    ));
     if !info.hmac_secret() {
         return Err(Error::Other(
             "this key does not advertise hmac-secret".into(),

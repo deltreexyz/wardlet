@@ -16,6 +16,15 @@ fn version_prints_the_package_version() {
 }
 
 #[test]
+fn debug_flag_logs_the_step_and_not_a_master_key() {
+    let output = wardlet(&["--debug", "version"]);
+    assert!(output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("debug: starting version"));
+    assert!(!stderr.contains("AGE-SECRET-KEY"));
+}
+
+#[test]
 fn help_lists_phase0_commands() {
     let output = wardlet(&["--help"]);
     assert!(output.status.success());
@@ -26,6 +35,7 @@ fn help_lists_phase0_commands() {
         assert!(stdout.contains(name), "help missing {name}");
     }
     assert!(stdout.contains("--passphrase"), "help missing --passphrase");
+    assert!(stdout.contains("--debug"), "help missing --debug");
 }
 
 #[test]
