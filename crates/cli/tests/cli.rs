@@ -1,0 +1,43 @@
+use std::process::Command;
+
+fn wardlet(args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_wardlet"))
+        .args(args)
+        .output()
+        .expect("run wardlet")
+}
+
+#[test]
+fn version_prints_the_package_version() {
+    let output = wardlet(&["version"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(stdout, format!("wardlet {}\n", env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
+fn help_lists_phase0_commands() {
+    let output = wardlet(&["--help"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    for name in [
+        "init", "config", "enc", "dec", "status", "keys", "recover", "version",
+    ] {
+        assert!(stdout.contains(name), "help missing {name}");
+    }
+    assert!(stdout.contains("--passphrase"), "help missing --passphrase");
+}
+
+#[test]
+fn keys_without_a_vault_exits_10() {
+    let dir = std::env::temp_dir().join("wardlet-missing-vault-for-keys-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    let output = wardlet(&["--dir", dir.to_str().expect("temp path is utf-8"), "keys"]);
+    assert_eq!(output.status.code(), Some(10));
+}
+
+#[test]
+fn enc_without_a_path_is_a_usage_error() {
+    let output = wardlet(&["enc"]);
+    assert_eq!(output.status.code(), Some(2));
+}

@@ -1,0 +1,21 @@
+[package]
+name = "wardlet-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description.workspace = true
+repository.workspace = true
+
+[dependencies]
+age = "0.12"
+bech32 = "0.11"
+hkdf = "0.12"
+libc = "0.2.189"
+rand = "0.8"
+serde = { version = "1.0.229", features = ["derive"] }
+sha2 = "0.10"
+thiserror = "2"
+toml = "1.1.6"
+zeroize = "1.9.0"
