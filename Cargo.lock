@@ -1866,7 +1866,7 @@ dependencies = [
 
 [[package]]
 name = "wardlet"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "ciborium",
  "clap",
@@ -1879,7 +1879,7 @@ dependencies = [
 
 [[package]]
 name = "wardlet-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "age",
  "age-core",

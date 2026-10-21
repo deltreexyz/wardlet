@@ -8,7 +8,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 
 use crate::Error;
-use crate::vault::{create_private_dir, sync_dir};
+use crate::vault::{create_private_dir, load_config, sync_dir};
 
 const MARKER: &str = "WARDLET-VAULT";
 const CONTAINER_VERSION: u32 = 1;
@@ -81,6 +81,9 @@ pub fn import_vault(file: &Path, destination: &Path) -> Result<(), Error> {
         if !allowed_path(relative) {
             return Err(Error::Other(format!("refusing vault entry {relative}")));
         }
+        if stored.iter().any(|(path, _)| path == relative) {
+            return Err(Error::Other(format!("vault export lists {relative} twice")));
+        }
         let mut length_line = String::new();
         if reader.read_line(&mut length_line).map_err(Error::io)? == 0 {
             return Err(Error::Other("vault export ended early".into()));
@@ -96,8 +99,34 @@ pub fn import_vault(file: &Path, destination: &Path) -> Result<(), Error> {
         reader.read_exact(&mut bytes).map_err(Error::io)?;
         stored.push((relative.to_owned(), bytes));
     }
-    if !stored.iter().any(|(path, _)| path == "config.toml") {
+    let Some((_, config_bytes)) = stored.iter().find(|(path, _)| path == "config.toml") else {
         return Err(Error::Other("vault export is missing config.toml".into()));
+    };
+    let config_text = String::from_utf8(config_bytes.clone())
+        .map_err(|_| Error::InvalidConfig("config.toml is not UTF-8".into()))?;
+    let config = load_config(&config_text)?;
+    let present: std::collections::HashSet<&str> =
+        stored.iter().map(|(path, _)| path.as_str()).collect();
+    let mut required: Vec<String> = config
+        .keys
+        .iter()
+        .map(|key| {
+            if key.mechanism == "recovery" {
+                format!("keys/{}.age", key.id)
+            } else {
+                format!("keys/{}.mask", key.id)
+            }
+        })
+        .collect();
+    for generation in &config.generations {
+        required.push(format!("epochs/{}.age", generation.epoch));
+    }
+    for relative in &required {
+        if !present.contains(relative.as_str()) {
+            return Err(Error::Other(format!(
+                "vault export is missing {relative}, which config.toml names"
+            )));
+        }
     }
     ensure_private_dir(destination)?;
     for (relative, bytes) in &stored {
@@ -159,11 +188,15 @@ fn walk(root: &Path, dir: &Path, found: &mut Vec<String>) -> Result<(), Error> {
         }
         let relative = path
             .strip_prefix(root)
-            .map_err(|_| Error::InvalidConfig)?
+            .map_err(|_| Error::InvalidConfig("entry path is not valid UTF-8".into()))?
             .to_str()
             .ok_or_else(|| Error::Other(format!("{} has no file name", path.display())))?;
         if allowed_path(relative) {
             found.push(relative.to_owned());
+        } else {
+            return Err(Error::Other(format!(
+                "refusing to export: {relative} is in the vault but Wardlet does not recognize it"
+            )));
         }
     }
     Ok(())
@@ -314,6 +347,37 @@ mod tests {
         let err = import_vault(&junk, &dir.0.join("other")).unwrap_err();
         let message = err.to_string();
         assert!(message.contains("not a Wardlet vault export"));
+    }
+
+    #[test]
+    fn export_refuses_a_stray_file_and_import_refuses_a_missing_wrapper() {
+        let dir = TempDir::new();
+        let source = dir.0.join("vault");
+        sample_vault(&source);
+        fs::write(source.join("stray.txt"), b"what is this").unwrap();
+        let err = export_vault(&source, &dir.0.join("out.wardlet")).unwrap_err();
+        assert!(err.to_string().contains("stray.txt"), "{err}");
+        fs::remove_file(source.join("stray.txt")).unwrap();
+
+        // Export, then hand-build a bundle missing the recovery wrapper.
+        let file = dir.0.join("vault.wardlet");
+        export_vault(&source, &file).unwrap();
+        let restored = dir.0.join("restored");
+        import_vault(&file, &restored).unwrap();
+        let recovery = restored
+            .join("keys")
+            .read_dir()
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .find(|path| path.extension().is_some_and(|ext| ext == "age"))
+            .unwrap();
+        fs::remove_file(&recovery).unwrap();
+        let broken = dir.0.join("broken.wardlet");
+        export_vault(&restored, &broken).unwrap();
+        let err = import_vault(&broken, &dir.0.join("again")).unwrap_err();
+        assert!(err.to_string().contains("missing keys/"), "{err}");
+        assert!(!dir.0.join("again").exists());
     }
 
     #[test]

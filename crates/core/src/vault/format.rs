@@ -1,5 +1,8 @@
 //! `config.toml` types and the `format_version` gate.
 
+use std::collections::HashSet;
+use std::str::FromStr;
+
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
@@ -38,9 +41,24 @@ pub struct Generation {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Settings {
+    #[serde(default = "default_session_timeout")]
     pub session_timeout_secs: u64,
+    #[serde(default = "default_suffix")]
     pub encryption_output_suffix: String,
+    #[serde(default = "default_recursion")]
     pub default_recursion: bool,
+}
+
+fn default_session_timeout() -> u64 {
+    900
+}
+
+fn default_suffix() -> String {
+    ".age".into()
+}
+
+fn default_recursion() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -79,11 +97,14 @@ pub struct KeyEntry {
     /// When this user last unwrapped the vault. Empty until the first successful use.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub last_used: String,
+    #[serde(default)]
     pub created: String,
+    #[serde(default)]
     pub role: String,
 }
 
 impl KeyEntry {
+    #[allow(clippy::too_many_arguments)]
     pub fn fido2_hmac(
         id: String,
         label: String,
@@ -177,16 +198,116 @@ impl Config {
     }
 
     pub fn to_toml(&self) -> Result<String, Error> {
-        toml::to_string(self).map_err(|_| Error::InvalidConfig)
+        toml::to_string(self).map_err(|err| Error::InvalidConfig(err.to_string()))
     }
 }
 
 pub fn load_config(text: &str) -> Result<Config, Error> {
-    let config: Config = toml::from_str(text).map_err(|_| Error::InvalidConfig)?;
+    let config: Config =
+        toml::from_str(text).map_err(|err| Error::InvalidConfig(err.to_string()))?;
     if config.format_version != FORMAT_VERSION && config.format_version != FORMAT_VERSION_CHAIN {
         return Err(Error::UnsupportedFormat(config.format_version));
     }
+    validate_config(&config)?;
     Ok(config)
+}
+
+fn invalid(message: impl Into<String>) -> Error {
+    Error::InvalidConfig(message.into())
+}
+
+fn is_hex(text: &str) -> bool {
+    !text.is_empty() && text.len() % 2 == 0 && text.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// Semantic checks beyond TOML parsing, so a tampered or truncated config is
+/// refused with the problem named instead of failing later in odd ways.
+pub fn validate_config(config: &Config) -> Result<(), Error> {
+    age::x25519::Recipient::from_str(&config.master_recipient)
+        .map_err(|_| invalid("the master recipient does not parse"))?;
+    let version = vault_version(config);
+    if config.format_version == FORMAT_VERSION && (version != 1 || !config.generations.is_empty()) {
+        return Err(invalid(
+            "format version 1 cannot list earlier vault versions",
+        ));
+    }
+    let mut generation_epochs = HashSet::new();
+    for generation in &config.generations {
+        if generation.epoch == 0 || generation.epoch >= version {
+            return Err(invalid(format!(
+                "generation for version {} is not earlier than version {version}",
+                generation.epoch
+            )));
+        }
+        if !generation_epochs.insert(generation.epoch) {
+            return Err(invalid(format!(
+                "generation for version {} is listed twice",
+                generation.epoch
+            )));
+        }
+        age::x25519::Recipient::from_str(&generation.recipient).map_err(|_| {
+            invalid(format!(
+                "the recipient for version {} does not parse",
+                generation.epoch
+            ))
+        })?;
+    }
+    for earlier in 1..version {
+        if !generation_epochs.contains(&earlier) {
+            return Err(invalid(format!(
+                "the generations list is missing version {earlier}"
+            )));
+        }
+    }
+
+    let mut ids = HashSet::new();
+    for key in &config.keys {
+        if key.id.len() != 32 || !key.id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(invalid(format!(
+                "key id {} is not 32 hex characters",
+                key.id
+            )));
+        }
+        if !ids.insert(key.id.as_str()) {
+            return Err(invalid(format!("key id {} is listed twice", key.id)));
+        }
+        match key.mechanism.as_str() {
+            "fido2-hmac" => {
+                age::x25519::Recipient::from_str(&key.recipient).map_err(|_| {
+                    invalid(format!(
+                        "key {} has a recipient that does not parse",
+                        key.id
+                    ))
+                })?;
+                if !is_hex(&key.credential_id) {
+                    return Err(invalid(format!(
+                        "key {} has no valid credential id",
+                        key.id
+                    )));
+                }
+                if key.salt.len() != 64 || !key.salt.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    return Err(invalid(format!(
+                        "key {} does not have a 32-byte salt",
+                        key.id
+                    )));
+                }
+                if !is_hex(&key.public_key) {
+                    return Err(invalid(format!("key {} has no valid public key", key.id)));
+                }
+                if key.rp_id.is_empty() {
+                    return Err(invalid(format!("key {} has no rp id", key.id)));
+                }
+            }
+            "recovery" => {}
+            other => {
+                return Err(invalid(format!(
+                    "key {} uses unknown mechanism {other}",
+                    key.id
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// User-facing vault version. Older files omit `epoch` and are version 1.
@@ -204,9 +325,13 @@ fn random_vault_id() -> String {
 mod tests {
     use super::{Config, load_config};
 
+    fn sample_recipient() -> String {
+        age::x25519::Identity::generate().to_public().to_string()
+    }
+
     #[test]
     fn format_version_3_refuses_to_open() {
-        let mut config = Config::new("age1example");
+        let mut config = Config::new(&sample_recipient());
         config.format_version = 3;
         let text = config.to_toml().unwrap();
         let err = load_config(&text).unwrap_err();
@@ -216,16 +341,20 @@ mod tests {
 
     #[test]
     fn format_version_2_is_the_chain_layout() {
-        let mut config = Config::new("age1example");
+        let mut config = Config::new(&sample_recipient());
         config.format_version = 2;
         config.epoch = 2;
+        config.generations.push(super::Generation {
+            epoch: 1,
+            recipient: sample_recipient(),
+        });
         let loaded = load_config(&config.to_toml().unwrap()).unwrap();
         assert_eq!(super::vault_version(&loaded), 2);
     }
 
     #[test]
     fn a_written_config_loads_and_holds_no_secret_shape() {
-        let config = Config::new("age1example");
+        let config = Config::new(&sample_recipient());
         let text = config.to_toml().unwrap();
         let loaded = load_config(&text).unwrap();
         assert_eq!(loaded.format_version, 1);
@@ -233,6 +362,39 @@ mod tests {
         assert_eq!(loaded.auth_mode, "fido2-hmac");
         assert!(loaded.keys.is_empty());
         assert!(!text.contains("AGE-SECRET-KEY"));
+    }
+
+    #[test]
+    fn tampered_configs_are_refused_with_the_problem_named() {
+        // Bad member id.
+        let mut config = Config::new(&sample_recipient());
+        let mut key = super::KeyEntry::recovery("zzzz".into());
+        config.keys.push(key.clone());
+        let err = load_config(&config.to_toml().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("not 32 hex"), "{err}");
+
+        // Unknown mechanism.
+        key.id = "0123456789abcdef0123456789abcdef".into();
+        key.mechanism = "telepathy".into();
+        config.keys = vec![key];
+        let err = load_config(&config.to_toml().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("unknown mechanism"), "{err}");
+
+        // Epoch without its generation entry.
+        let mut config = Config::new(&sample_recipient());
+        config.format_version = 2;
+        config.epoch = 2;
+        let err = load_config(&config.to_toml().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("missing version 1"), "{err}");
+    }
+
+    #[test]
+    fn a_config_missing_optional_fields_still_loads() {
+        let config = Config::new(&sample_recipient());
+        let text = config.to_toml().unwrap();
+        let text = text.replace("[settings]\n", "");
+        let loaded = load_config(&text).unwrap();
+        assert_eq!(loaded.settings.session_timeout_secs, 900);
     }
 
     #[test]

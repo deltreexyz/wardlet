@@ -40,7 +40,8 @@ pub fn load(dir: &Path, master: &Master) -> Result<Vec<StoredName>, Error> {
     }
     let bytes = fs::read(&path).map_err(Error::io)?;
     let plain = decrypt(master, &bytes)?;
-    let book: NameBook = toml::from_str(&plain).map_err(|_| Error::InvalidConfig)?;
+    let book: NameBook = toml::from_str(&plain)
+        .map_err(|_| Error::InvalidConfig("the sealed labels are not valid".into()))?;
     Ok(book.members)
 }
 
@@ -107,7 +108,8 @@ fn save_config(dir: &Path, config: &Config) -> Result<(), Error> {
 }
 
 fn encrypt(master: &Master, plaintext: &[u8]) -> Result<Vec<u8>, Error> {
-    let recipient = Recipient::from_str(&master.recipient()).map_err(|_| Error::InvalidConfig)?;
+    let recipient = Recipient::from_str(&master.recipient())
+        .map_err(|_| Error::InvalidConfig("master recipient does not parse".into()))?;
     let encryptor = Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
         .expect("a single recipient is valid");
     let mut output = Vec::new();
@@ -120,7 +122,8 @@ fn encrypt(master: &Master, plaintext: &[u8]) -> Result<Vec<u8>, Error> {
 fn decrypt(master: &Master, ciphertext: &[u8]) -> Result<String, Error> {
     let identity =
         Identity::from_str(master.expose_secret()).map_err(|_| Error::CorruptRecovery)?;
-    let decryptor = Decryptor::new(ciphertext).map_err(|_| Error::InvalidConfig)?;
+    let decryptor = Decryptor::new(ciphertext)
+        .map_err(|_| Error::InvalidConfig("the sealed labels are not an age file".into()))?;
     let mut reader = decryptor
         .decrypt(std::iter::once(&identity as &dyn age::Identity))
         .map_err(|_| Error::WrongPassphrase)?;

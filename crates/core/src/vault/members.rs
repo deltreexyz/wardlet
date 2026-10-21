@@ -54,9 +54,10 @@ pub fn list_members(dir: &Path) -> Result<Vec<MemberInfo>, Error> {
 }
 
 /// Member list with labels and device names filled in from `names.age`.
+/// Labels are best-effort: a corrupt names file never blocks the vault.
 pub fn list_members_unlocked(dir: &Path, master: &Master) -> Result<Vec<MemberInfo>, Error> {
-    names::absorb_plaintext(dir, master)?;
-    let book = names::load(dir, master)?;
+    let _ = names::absorb_plaintext(dir, master);
+    let book = names::load(dir, master).unwrap_or_default();
     let mut members = list_members(dir)?;
     for member in &mut members {
         if let Some(stored) = book.iter().find(|item| item.id == member.id) {
@@ -167,38 +168,52 @@ pub fn remove_member_unlocked(
 }
 
 /// Open a hardware member's `.mask` using hmac-secret output.
+/// Every wrapper is tried: one corrupt or missing wrapper must not defeat
+/// the other enrolled keys. Bookkeeping after a successful unwrap is
+/// best-effort and never fails the unlock.
 pub fn unlock_with_hmac(dir: &Path, hmac: &[u8; 32]) -> Result<Master, Error> {
     let config = load_config_file(dir)?;
     let card = keys::identity_from_hmac(hmac)?;
     let mut saw_hardware = false;
+    let mut structural: Option<Error> = None;
     for key in &config.keys {
         if key.mechanism != FIDO2_MECHANISM {
             continue;
         }
         saw_hardware = true;
-        let path = member_mask_path(dir, &key.id)?;
-        let bytes = fs::read(&path).map_err(|err| {
-            if err.kind() == std::io::ErrorKind::NotFound {
-                Error::Other(format!("missing wrapper for user {}", key.id))
-            } else {
-                Error::io(err)
+        let path = match member_mask_path(dir, &key.id) {
+            Ok(path) => path,
+            Err(err) => {
+                structural.get_or_insert(err);
+                continue;
             }
-        })?;
+        };
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                structural.get_or_insert_with(|| {
+                    Error::Other(format!("cannot read wrapper {}: {err}", path.display()))
+                });
+                continue;
+            }
+        };
         match keys::open_mask(&bytes, &card) {
             Ok(master) => {
-                mark_member_used(dir, &key.id)?;
-                names::absorb_plaintext(dir, &master)?;
+                let _ = mark_member_used(dir, &key.id);
+                let _ = names::absorb_plaintext(dir, &master);
                 return Ok(master);
             }
             Err(Error::WrongPassphrase) => continue,
-            Err(err) => return Err(err),
+            Err(err) => {
+                structural.get_or_insert(err);
+                continue;
+            }
         }
     }
-    if saw_hardware {
-        Err(Error::WrongPassphrase)
-    } else {
-        Err(Error::Other("vault has no hardware user".into()))
+    if !saw_hardware {
+        return Err(Error::Other("vault has no hardware user".into()));
     }
+    Err(structural.unwrap_or(Error::WrongPassphrase))
 }
 
 pub(crate) fn write_first_hardware_member(
@@ -265,43 +280,61 @@ pub fn unlock_with_recovery_code(dir: &Path, typed: &str) -> Result<Master, Erro
         .filter(|key| key.mechanism == RECOVERY_MECHANISM)
         .map(|key| key.id.clone())
         .collect();
+    let mut structural: Option<Error> = None;
     for id in ids {
-        let path = member_age_path(dir, &id)?;
-        let bytes = fs::read(&path).map_err(Error::io)?;
+        let Ok(path) = member_age_path(dir, &id) else {
+            continue;
+        };
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                structural.get_or_insert_with(|| Error::io(err));
+                continue;
+            }
+        };
         match passphrase::open_recovery(&bytes, &secret) {
             Ok(master) => {
                 config.recovery_replacement_due = true;
                 if let Some(entry) = config.keys.iter_mut().find(|entry| entry.id == id) {
                     entry.last_used = format::utc_now();
                 }
-                save_config(dir, &config)?;
+                // Best-effort: a read-only vault still unlocks.
+                let _ = save_config(dir, &config);
                 return Ok(master);
             }
             Err(Error::WrongPassphrase) => continue,
-            Err(err) => return Err(err),
+            Err(err) => {
+                structural.get_or_insert(err);
+                continue;
+            }
         }
     }
     let epochs = dir.join("epochs");
     if epochs.is_dir() {
-        let entries = fs::read_dir(&epochs).map_err(Error::io)?;
-        for entry in entries {
-            let entry = entry.map_err(Error::io)?;
-            let name = entry.file_name();
-            let Some(name) = name.to_str() else {
-                continue;
-            };
-            if !(name.starts_with("recovery-") && name.ends_with(".age")) {
-                continue;
-            }
-            let bytes = fs::read(entry.path()).map_err(Error::io)?;
-            match passphrase::open_recovery(&bytes, &secret) {
-                Ok(master) => return Ok(master),
-                Err(Error::WrongPassphrase) => continue,
-                Err(err) => return Err(err),
+        if let Ok(entries) = fs::read_dir(&epochs) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let Some(name) = name.to_str() else {
+                    continue;
+                };
+                if !(name.starts_with("recovery-") && name.ends_with(".age")) {
+                    continue;
+                }
+                let Ok(bytes) = fs::read(entry.path()) else {
+                    continue;
+                };
+                match passphrase::open_recovery(&bytes, &secret) {
+                    Ok(master) => return Ok(master),
+                    Err(Error::WrongPassphrase) => continue,
+                    Err(err) => {
+                        structural.get_or_insert(err);
+                        continue;
+                    }
+                }
             }
         }
     }
-    Err(Error::WrongPassphrase)
+    Err(structural.unwrap_or(Error::WrongPassphrase))
 }
 
 /// Replace every recovery wrapper in this directory with `ciphertext`.
@@ -384,7 +417,9 @@ fn member_wrapper_path(dir: &Path, entry: &KeyEntry) -> Result<PathBuf, Error> {
 
 fn validate_member_id(id: &str) -> Result<(), Error> {
     if id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return Err(Error::InvalidConfig);
+        return Err(Error::InvalidConfig(format!(
+            "member id {id} is not 32 hex characters"
+        )));
     }
     Ok(())
 }
@@ -431,11 +466,14 @@ pub(crate) fn bytes_to_hex(bytes: &[u8]) -> String {
 
 pub fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, Error> {
     if hex.len() % 2 != 0 {
-        return Err(Error::InvalidConfig);
+        return Err(Error::InvalidConfig("a hex field has an odd length".into()));
     }
     (0..hex.len())
         .step_by(2)
-        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).map_err(|_| Error::InvalidConfig))
+        .map(|i| {
+            u8::from_str_radix(&hex[i..i + 2], 16)
+                .map_err(|_| Error::InvalidConfig("a hex field is not hex".into()))
+        })
         .collect()
 }
 
@@ -469,7 +507,9 @@ pub fn has_hardware_member(dir: &Path) -> Result<bool, Error> {
 
 pub fn hex_to_salt(hex: &str) -> Result<[u8; 32], Error> {
     let bytes = hex_to_bytes(hex)?;
-    bytes.try_into().map_err(|_| Error::InvalidConfig)
+    bytes
+        .try_into()
+        .map_err(|_| Error::InvalidConfig("a salt is not 32 bytes".into()))
 }
 
 fn mark_member_used(dir: &Path, id: &str) -> Result<(), Error> {
@@ -646,6 +686,44 @@ mod tests {
         );
         let still = unlock_with_hmac(dir.path(), &hmac).unwrap();
         assert_eq!(still.recipient(), created.recipient);
+    }
+
+    #[test]
+    fn unlock_survives_a_corrupt_wrapper_and_corrupt_names() {
+        let dir = TempDir::new();
+        let first = [0x41u8; 32];
+        let created = init_hardware_vault(dir.path(), "one", &first, &fake_params()).unwrap();
+        let master = unlock_with_hmac(dir.path(), &first).unwrap();
+        let second = [0x42u8; 32];
+        add_hardware_member_unlocked(dir.path(), &master, "two", &second, &fake_params()).unwrap();
+
+        let config =
+            load_config(&fs::read_to_string(dir.path().join("config.toml")).unwrap()).unwrap();
+        let first_id = config.keys[0].id.clone();
+        fs::write(
+            dir.path().join("keys").join(format!("{first_id}.mask")),
+            b"not an age file",
+        )
+        .unwrap();
+        fs::write(dir.path().join("names.age"), b"not an age file").unwrap();
+
+        let opened = unlock_with_hmac(dir.path(), &second).unwrap();
+        assert_eq!(opened.recipient(), created.recipient);
+        let members = list_members_unlocked(dir.path(), &opened).unwrap();
+        assert_eq!(members.len(), 2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unlock_works_when_the_vault_directory_is_read_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new();
+        let hmac = [0x43u8; 32];
+        let created = init_hardware_vault(dir.path(), "one", &hmac, &fake_params()).unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o500)).unwrap();
+        let result = unlock_with_hmac(dir.path(), &hmac);
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(result.unwrap().recipient(), created.recipient);
     }
 
     #[test]

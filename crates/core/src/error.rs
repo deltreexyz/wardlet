@@ -41,8 +41,8 @@ pub enum Error {
     #[error("recovery.age is not a valid age file")]
     CorruptRecovery,
 
-    #[error("config.toml is not a valid vault config")]
-    InvalidConfig,
+    #[error("config.toml is not a valid vault config: {0}")]
+    InvalidConfig(String),
 
     #[error("{0}")]
     Io(String),
@@ -68,7 +68,7 @@ impl Error {
             | Error::LabelRequired
             | Error::UnsupportedFormat(_)
             | Error::CorruptRecovery
-            | Error::InvalidConfig
+            | Error::InvalidConfig(_)
             | Error::Other(_) => 1,
         }
     }
@@ -92,6 +92,7 @@ mod tests {
         assert_eq!(Error::Io("disk".into()).exit_code(), 16);
         assert_eq!(Error::UnsupportedFormat(2).exit_code(), 1);
         assert_eq!(Error::CorruptRecovery.exit_code(), 1);
+        assert_eq!(Error::InvalidConfig("bad".into()).exit_code(), 1);
         assert_eq!(Error::Other("boom".into()).exit_code(), 1);
         assert_eq!(Error::LastMember.exit_code(), 1);
     }

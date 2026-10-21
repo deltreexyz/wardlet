@@ -158,6 +158,9 @@ fn run(cli: Cli) -> Result<(), Error> {
 
 fn init(dir: Option<PathBuf>, show_banner: bool) -> Result<(), Error> {
     let dir = vault_dir(dir)?;
+    if dir.exists() {
+        return Err(Error::VaultExists);
+    }
     debug::log(&format!("vault directory {}", dir.display()));
     if show_banner {
         print_banner();
@@ -244,6 +247,7 @@ struct Visit {
 
 fn configure(dir: Option<PathBuf>) -> Result<(), Error> {
     let dir = vault_dir(dir)?;
+    recover_interrupted_commit(&dir);
     if !dir.join("config.toml").is_file() {
         print_banner();
         println!("No vault at {}", dir.display());
@@ -386,6 +390,30 @@ fn finish_visit(dir: &std::path::Path, visit: &mut Option<Visit>) -> Result<(), 
     Ok(())
 }
 
+/// A commit renames the vault aside, then the new vault into place. If the
+/// program died between those renames, put the previous vault back.
+fn recover_interrupted_commit(dir: &Path) {
+    if dir.exists() {
+        return;
+    }
+    let parent = dir.parent().unwrap_or_else(|| Path::new("."));
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with(".wardlet-previous-") && entry.path().is_dir() {
+            if std::fs::rename(entry.path(), dir).is_ok() {
+                println!(
+                    "An earlier vault update was interrupted. The previous vault was restored at {}.",
+                    dir.display()
+                );
+            }
+            return;
+        }
+    }
+}
+
 fn commit_visit(vault: &std::path::Path, scratch: &std::path::Path) -> Result<(), Error> {
     let parent = vault.parent().unwrap_or_else(|| std::path::Path::new("."));
     let mut bytes = [0u8; 4];
@@ -408,7 +436,7 @@ fn unlock_for_visit(dir: &std::path::Path) -> Result<Master, Error> {
             "f" | "F" => return fido::unlock_vault_with_hardware(dir),
             "r" | "R" => {
                 debug::log("unlocking the visit with the recovery code");
-                let mut typed = prompt_line("Recovery code")?;
+                let mut typed = prompt_recovery_code()?;
                 let master = vault::unlock_with_recovery_code(dir, &typed);
                 typed.zeroize();
                 return master;
@@ -451,6 +479,22 @@ fn keys(dir: Option<PathBuf>, json: bool) -> Result<(), Error> {
     } else {
         let noun = if members.len() == 1 { "key" } else { "keys" };
         println!("{} {noun}.", members.len());
+        for member in &members {
+            let kind = if member.key_product.is_empty() {
+                member.mechanism.as_str()
+            } else {
+                member.key_product.as_str()
+            };
+            let used = if member.last_used.is_empty() {
+                "never"
+            } else {
+                member.last_used.as_str()
+            };
+            println!("{}  {kind}  last used {used}", member.id);
+        }
+        println!(
+            "Names are sealed in the vault. Run wardlet config and choose v) View keys to see them."
+        );
     }
     Ok(())
 }
@@ -480,7 +524,7 @@ fn recover(dir: Option<PathBuf>) -> Result<(), Error> {
     let dir = vault_dir(dir)?;
     print_banner();
     debug::log("unlocking with the recovery code");
-    let mut typed = prompt_line("Recovery code")?;
+    let mut typed = prompt_recovery_code()?;
     let master = vault::unlock_with_recovery_code(&dir, &typed);
     typed.zeroize();
     drop(master?);
@@ -545,32 +589,24 @@ fn confirm_delete_originals(actions: &[FileAction]) -> Result<bool, Error> {
     println!("{checked}");
     let sources = wrote_sources(actions);
     let question = if let [only] = sources.as_slice() {
-        format!("Delete the original file {}? [Y/n]", only.display())
+        format!("Delete the original file {}?", only.display())
     } else {
         for source in &sources {
             println!("{}", source.display());
         }
-        "Delete these original files? [Y/n]".to_owned()
+        "Delete these original files?".to_owned()
     };
-    loop {
-        let line = prompt_line(&question)?;
-        match line.trim() {
-            "" | "y" | "Y" | "yes" | "YES" => return Ok(true),
-            "n" | "N" | "no" | "NO" => return Ok(false),
-            _ => println!("Answer y or n."),
-        }
-    }
+    Ok(prompt_yes(&question))
 }
 
 fn confirm_recovery_saved() -> Result<bool, Error> {
-    loop {
-        let line = prompt_line("Please confirm you have saved your recovery code [Y/n]")?;
-        match line.trim() {
-            "" | "y" | "Y" | "yes" | "YES" => return Ok(true),
-            "n" | "N" | "no" | "NO" => return Ok(false),
-            _ => println!("Answer y or n."),
-        }
-    }
+    Ok(prompt_yes(
+        "Please confirm you have saved your recovery code",
+    ))
+}
+
+fn prompt_recovery_code() -> Result<String, Error> {
+    rpassword::prompt_password("Recovery code: ").map_err(Error::io)
 }
 
 fn clear_screen() {
@@ -632,26 +668,28 @@ fn encrypt(
 ) -> Result<(), Error> {
     debug::log("encrypting named paths");
     let dir = vault_dir(dir)?;
+    if !dir.join("config.toml").is_file() {
+        return Err(Error::VaultNotFound);
+    }
+    let suffix = file_suffix(&dir);
+    let stamp = vault_stamp(&dir)?;
+    let request = ops::EncryptRequest {
+        paths,
+        recursive,
+        output: output.as_deref(),
+        remove_source,
+        stdout,
+        suffix: &suffix,
+        stamp: Some(stamp),
+    };
+    ops::preflight_encrypt(&request)?;
     let master = unlock_existing(&dir)?;
     if !vault::is_latest_master(&dir, &master)? {
         return Err(Error::Other(
             "This key opens an older version of this vault. Import the newer vault before encrypting.".into(),
         ));
     }
-    let suffix = file_suffix(&dir);
-    let stamp = vault_stamp(&dir)?;
-    let actions = ops::encrypt_paths(
-        &master,
-        &ops::EncryptRequest {
-            paths,
-            recursive,
-            output: output.as_deref(),
-            remove_source,
-            stdout,
-            suffix: &suffix,
-            stamp: Some(stamp),
-        },
-    )?;
+    let actions = ops::encrypt_paths(&master, &request)?;
     report_actions(&actions, "encrypted");
     if remove_source {
         print_deleted(&actions);
@@ -671,22 +709,22 @@ fn decrypt(
 ) -> Result<(), Error> {
     debug::log("decrypting named paths");
     let dir = vault_dir(dir)?;
+    if !dir.join("config.toml").is_file() {
+        return Err(Error::VaultNotFound);
+    }
+    let suffix = file_suffix(&dir);
+    let request = ops::DecryptRequest {
+        paths,
+        recursive,
+        output: output.as_deref(),
+        force,
+        suffix: &suffix,
+    };
+    ops::preflight_decrypt(&request)?;
     let master = unlock_existing(&dir)?;
     let stamp = vault_stamp(&dir)?;
     let chain = vault::masters_covering(&dir, master)?;
-    let suffix = file_suffix(&dir);
-    let actions = ops::decrypt_vault(
-        &chain,
-        &stamp.vault_id,
-        stamp.version,
-        &ops::DecryptRequest {
-            paths,
-            recursive,
-            output: output.as_deref(),
-            force,
-            suffix: &suffix,
-        },
-    )?;
+    let actions = ops::decrypt_vault(&chain, &stamp.vault_id, stamp.version, &request)?;
     report_actions(&actions, "decrypted");
     Ok(())
 }
@@ -721,6 +759,7 @@ fn edit(dir: Option<PathBuf>, file: &Path) -> Result<(), Error> {
         Some(_) => {}
     }
 
+    let before = file_fingerprint(&ciphertext);
     let master = unlock_latest(&dir)?;
     let chain = vault::masters_covering(&dir, master)?;
     let work = editor_work_dir(&ciphertext)?;
@@ -730,7 +769,7 @@ fn edit(dir: Option<PathBuf>, file: &Path) -> Result<(), Error> {
         &vault.vault_id,
         vault.version,
         &ops::DecryptRequest {
-            paths: &[ciphertext.clone()],
+            paths: std::slice::from_ref(&ciphertext),
             recursive: false,
             output: Some(&work),
             force: true,
@@ -761,6 +800,7 @@ fn edit(dir: Option<PathBuf>, file: &Path) -> Result<(), Error> {
         &work,
         &suffix,
         "Updated",
+        before,
     )
 }
 
@@ -803,6 +843,7 @@ fn new_file(dir: Option<PathBuf>, file: &Path) -> Result<(), Error> {
         &work,
         &suffix,
         "Created",
+        None,
     )
 }
 
@@ -816,6 +857,7 @@ fn unlock_latest(dir: &Path) -> Result<Master, Error> {
     Ok(master)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn finish_editor_encrypt(
     dir: &Path,
     master: &Master,
@@ -824,6 +866,7 @@ fn finish_editor_encrypt(
     work: &Path,
     suffix: &str,
     done: &str,
+    guard: Option<(std::time::SystemTime, u64)>,
 ) -> Result<(), Error> {
     match run_editor(plain) {
         Ok(status) if status.success() => {}
@@ -844,6 +887,19 @@ fn finish_editor_encrypt(
             );
             return Err(err);
         }
+    }
+
+    let changed = match guard {
+        Some(before) => file_fingerprint(ciphertext) != Some(before),
+        None => ciphertext.exists(),
+    };
+    if changed {
+        eprintln!(
+            "{} changed while the editor was open. It was not replaced. Plaintext left at {}.",
+            ciphertext.display(),
+            plain.display()
+        );
+        return Err(Error::Other("ciphertext changed during edit".into()));
     }
 
     let stamp = vault_stamp(dir)?;
@@ -957,20 +1013,25 @@ fn editor_work_dir(beside: &Path) -> Result<PathBuf, Error> {
     let mut bytes = [0u8; 4];
     rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
     let name: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-    let parent = path_parent(beside);
-    let dir = parent.join(format!(".wardlet-edit-{name}"));
-    match create_private_dir(&dir) {
-        Ok(()) => Ok(dir),
-        Err(_) => {
-            let base = std::env::var_os("XDG_RUNTIME_DIR")
-                .filter(|value| !value.is_empty())
-                .map(PathBuf::from)
-                .unwrap_or_else(std::env::temp_dir);
-            let fallback = base.join(format!("wardlet-edit-{name}"));
-            create_private_dir(&fallback)?;
-            Ok(fallback)
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").filter(|value| !value.is_empty()) {
+        candidates.push(PathBuf::from(runtime).join(format!("wardlet-edit-{name}")));
+    }
+    candidates.push(path_parent(beside).join(format!(".wardlet-edit-{name}")));
+    candidates.push(std::env::temp_dir().join(format!("wardlet-edit-{name}")));
+    let mut last_err = None;
+    for candidate in candidates {
+        match create_private_dir(&candidate) {
+            Ok(()) => return Ok(candidate),
+            Err(err) => last_err = Some(err),
         }
     }
+    Err(last_err.unwrap_or_else(|| Error::Other("no editor work directory".into())))
+}
+
+fn file_fingerprint(path: &Path) -> Option<(std::time::SystemTime, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
 }
 
 fn create_private_dir(path: &Path) -> Result<(), Error> {
@@ -999,9 +1060,21 @@ fn create_private_empty_file(path: &Path) -> Result<(), Error> {
 fn run_editor(path: &Path) -> Result<std::process::ExitStatus, Error> {
     if let Some(editor) = std::env::var_os("EDITOR").filter(|value| !value.is_empty()) {
         debug::log(&format!("running editor {}", editor.to_string_lossy()));
-        return spawn_editor(&editor, path).map_err(|err| {
-            Error::Other(format!("could not run {}: {err}", editor.to_string_lossy()))
-        });
+        match spawn_editor(&editor, path) {
+            Ok(status) => return Ok(status),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                println!(
+                    "{} was not found. Falling back to nano, then vi. EDITOR is a program name only.",
+                    editor.to_string_lossy()
+                );
+            }
+            Err(err) => {
+                return Err(Error::Other(format!(
+                    "could not run {}: {err}",
+                    editor.to_string_lossy()
+                )));
+            }
+        }
     }
     debug::log("running editor nano");
     match spawn_editor(std::ffi::OsStr::new("nano"), path) {
@@ -1092,6 +1165,7 @@ fn unlock_existing(dir: &std::path::Path) -> Result<Master, Error> {
 fn status(dir: Option<PathBuf>, json: bool) -> Result<(), Error> {
     debug::log("reading vault status");
     let dir = vault_dir(dir)?;
+    recover_interrupted_commit(&dir);
     let text = match std::fs::read_to_string(dir.join("config.toml")) {
         Ok(text) => text,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -1127,6 +1201,52 @@ fn status(dir: Option<PathBuf>, json: bool) -> Result<(), Error> {
         "Recovery code: {}",
         if recovery { "enrolled" } else { "none" }
     );
+    let mut problems = 0;
+    let mut referenced: Vec<String> = config
+        .keys
+        .iter()
+        .map(|key| {
+            if key.mechanism == vault::RECOVERY_MECHANISM {
+                format!("keys/{}.age", key.id)
+            } else {
+                format!("keys/{}.mask", key.id)
+            }
+        })
+        .collect();
+    for generation in &config.generations {
+        referenced.push(format!("epochs/{}.age", generation.epoch));
+    }
+    for relative in &referenced {
+        if !dir.join(relative).is_file() {
+            println!("Missing: {relative}");
+            problems += 1;
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".partial") || name.starts_with(".wardlet-edit-") {
+                println!("Leftover: {}", entry.path().display());
+                problems += 1;
+            }
+        }
+    }
+    if let Some(parent) = dir.parent() {
+        if let Ok(entries) = std::fs::read_dir(parent) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with(".wardlet-visit-") || name.starts_with(".wardlet-previous-") {
+                    println!("Leftover: {}", entry.path().display());
+                    problems += 1;
+                }
+            }
+        }
+    }
+    if problems == 0 {
+        println!("Health: ok");
+    } else {
+        println!("Health: {problems} problem(s) above");
+    }
     Ok(())
 }
 

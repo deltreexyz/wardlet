@@ -84,6 +84,7 @@ pub fn encrypt_paths(
             continue;
         }
         let destination = destination_path(&job, &suffix, request.output, true)?;
+        warn_if_newer_than_ciphertext(&job.source, &destination);
         encrypt_one(master, &job.source, &destination, request.stamp.as_ref())?;
         actions.push(FileAction::Wrote {
             source: job.source,
@@ -101,6 +102,53 @@ pub fn delete_sources(actions: &[FileAction]) -> Result<(), Error> {
     for action in actions {
         if let FileAction::Wrote { source, .. } = action {
             fs::remove_file(source).map_err(Error::io)?;
+        }
+    }
+    Ok(())
+}
+
+/// Check an encrypt command before any key is touched: paths exist and two
+/// inputs never write the same destination.
+pub fn preflight_encrypt(request: &EncryptRequest<'_>) -> Result<(), Error> {
+    if request.stdout && request.remove_source {
+        return Err(Error::Other(
+            "--remove-source cannot be used with --stdout".into(),
+        ));
+    }
+    let suffix = normalize_suffix(request.suffix);
+    let jobs = collect(request.paths, request.recursive, &suffix, true)?;
+    let mut destinations: HashSet<PathBuf> = HashSet::new();
+    for job in jobs.iter().filter(|job| !job.skip) {
+        if request.stdout {
+            continue;
+        }
+        let destination = destination_path(job, &suffix, request.output, true)?;
+        if !destinations.insert(destination.clone()) {
+            return Err(Error::Other(format!(
+                "two files would both be written to {}",
+                destination.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Check a decrypt command before any key is touched: paths exist, two inputs
+/// never write the same destination, and no destination is already there.
+pub fn preflight_decrypt(request: &DecryptRequest<'_>) -> Result<(), Error> {
+    let suffix = normalize_suffix(request.suffix);
+    let jobs = collect(request.paths, request.recursive, &suffix, false)?;
+    let mut destinations: HashSet<PathBuf> = HashSet::new();
+    for job in jobs.iter().filter(|job| !job.skip) {
+        let destination = destination_path(job, &suffix, request.output, false)?;
+        if !destinations.insert(destination.clone()) {
+            return Err(Error::Other(format!(
+                "two files would both be written to {}",
+                destination.display()
+            )));
+        }
+        if destination.exists() && !request.force {
+            return Err(Error::Collision);
         }
     }
     Ok(())
@@ -141,6 +189,22 @@ pub fn decrypt_vault(
         });
     }
     Ok(actions)
+}
+
+fn warn_if_newer_than_ciphertext(source: &Path, destination: &Path) {
+    let (Ok(source_meta), Ok(dest_meta)) = (fs::metadata(source), fs::metadata(destination)) else {
+        return;
+    };
+    let (Ok(source_time), Ok(dest_time)) = (source_meta.modified(), dest_meta.modified()) else {
+        return;
+    };
+    if source_time > dest_time {
+        eprintln!(
+            "Note: {} changed after it was encrypted. The new copy replaces {}.",
+            source.display(),
+            destination.display()
+        );
+    }
 }
 
 struct Job {
@@ -297,8 +361,8 @@ fn encrypt_one(
             return Err(err);
         }
     };
-    let ciphertext = fs::read(&partial).map_err(Error::io)?;
-    let opened_hash = decrypt_bytes(master, &ciphertext)?;
+    let partial_file = File::open(&partial).map_err(Error::io)?;
+    let opened_hash = decrypted_hash(master, partial_file)?;
     if opened_hash != plain_hash {
         let _ = fs::remove_file(&partial);
         return Err(Error::Other(format!(
@@ -331,7 +395,8 @@ fn encrypt_reader(
     output: &mut impl Write,
     stamp: Option<&FileStamp>,
 ) -> Result<Vec<u8>, Error> {
-    let recipient = Recipient::from_str(&master.recipient()).map_err(|_| Error::InvalidConfig)?;
+    let recipient = Recipient::from_str(&master.recipient())
+        .map_err(|_| Error::InvalidConfig("master recipient does not parse".into()))?;
     let marker = stamp.map(StampRecipient::from_stamp);
     let mut recipients: Vec<&dyn age::Recipient> = vec![&recipient];
     if let Some(marker) = &marker {
@@ -369,13 +434,13 @@ fn decrypt_one(
     {
         fs::create_dir_all(parent).map_err(Error::io)?;
     }
-    let ciphertext = fs::read(source).map_err(Error::io)?;
     let partial = partial_path(destination);
     let write_result = (|| -> Result<(), Error> {
         for master in masters {
             let identity = Identity::from_str(master.expose_secret())
                 .map_err(|_| Error::Other("vault master is not an age identity".into()))?;
-            let decryptor = Decryptor::new(ciphertext.as_slice())
+            let input = File::open(source).map_err(Error::io)?;
+            let decryptor = Decryptor::new(input)
                 .map_err(|_| Error::Other(format!("{} is not an age file", source.display())))?;
             let mut reader =
                 match decryptor.decrypt(std::iter::once(&identity as &dyn age::Identity)) {
@@ -395,11 +460,9 @@ fn decrypt_one(
             output.sync_all().map_err(Error::io)?;
             return Ok(());
         }
+        let header = read_header_prefix(source).unwrap_or_default();
         Err(Error::Other(stale_or_foreign(
-            &ciphertext,
-            vault_id,
-            version,
-            source,
+            &header, vault_id, version, source,
         )))
     })();
     if let Err(err) = write_result {
@@ -423,8 +486,18 @@ fn stale_or_foreign(ciphertext: &[u8], vault_id: &str, version: u32, path: &Path
 
 /// Vault id and version from a Wardlet age header, when present.
 pub fn file_stamp(path: &Path) -> Result<Option<FileStamp>, Error> {
-    let ciphertext = fs::read(path).map_err(Error::io)?;
-    Ok(read_stamp(&ciphertext))
+    let header = read_header_prefix(path)?;
+    Ok(read_stamp(&header))
+}
+
+fn read_header_prefix(path: &Path) -> Result<Vec<u8>, Error> {
+    let mut buf = Vec::new();
+    File::open(path)
+        .map_err(Error::io)?
+        .take(64 * 1024)
+        .read_to_end(&mut buf)
+        .map_err(Error::io)?;
+    Ok(buf)
 }
 
 fn read_stamp(ciphertext: &[u8]) -> Option<FileStamp> {
@@ -474,11 +547,11 @@ impl age::Recipient for StampRecipient {
     }
 }
 
-fn decrypt_bytes(master: &Master, ciphertext: &[u8]) -> Result<Vec<u8>, Error> {
+fn decrypted_hash(master: &Master, input: impl Read) -> Result<Vec<u8>, Error> {
     let identity = Identity::from_str(master.expose_secret())
         .map_err(|_| Error::Other("vault master is not an age identity".into()))?;
-    let decryptor = Decryptor::new(ciphertext)
-        .map_err(|_| Error::Other("ciphertext is not an age file".into()))?;
+    let decryptor =
+        Decryptor::new(input).map_err(|_| Error::Other("ciphertext is not an age file".into()))?;
     let mut reader = decryptor
         .decrypt(std::iter::once(&identity as &dyn age::Identity))
         .map_err(|_| Error::Other("ciphertext does not open with this vault".into()))?;
@@ -584,7 +657,10 @@ mod tests {
     use std::os::unix::fs::symlink;
     use std::path::PathBuf;
 
-    use super::{DecryptRequest, EncryptRequest, FileAction, decrypt_paths, encrypt_paths};
+    use super::{
+        DecryptRequest, EncryptRequest, FileAction, decrypt_paths, encrypt_paths,
+        preflight_decrypt, preflight_encrypt,
+    };
     use crate::master::Master;
     use crate::vault::keys::{identity_from_hmac, seal_mask};
 
@@ -628,6 +704,46 @@ mod tests {
     }
 
     #[test]
+    fn preflight_refuses_colliding_batch_destinations() {
+        let dir = TempDir::new();
+        let a = dir.0.join("a");
+        let b = dir.0.join("b");
+        fs::create_dir_all(&a).unwrap();
+        fs::create_dir_all(&b).unwrap();
+        let one = a.join("same.txt");
+        let two = b.join("same.txt");
+        fs::write(&one, b"one").unwrap();
+        fs::write(&two, b"two").unwrap();
+        let out = dir.0.join("out");
+        let paths = vec![one, two];
+        let err = preflight_encrypt(&EncryptRequest {
+            paths: &paths,
+            recursive: false,
+            output: Some(&out),
+            remove_source: false,
+            stdout: false,
+            suffix: ".age",
+            stamp: None,
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("both be written"), "{err}");
+
+        let existing = dir.0.join("plain.txt");
+        fs::write(&existing, b"here").unwrap();
+        let cipher = dir.0.join("plain.txt.age");
+        fs::write(&cipher, b"x").unwrap();
+        let err = preflight_decrypt(&DecryptRequest {
+            paths: std::slice::from_ref(&cipher),
+            recursive: false,
+            output: None,
+            force: false,
+            suffix: ".age",
+        })
+        .unwrap_err();
+        assert!(matches!(err, crate::Error::Collision), "{err}");
+    }
+
+    #[test]
     fn round_trip_and_a_second_encryption_differs() {
         let dir = TempDir::new();
         let source = dir.0.join("note.txt");
@@ -656,7 +772,7 @@ mod tests {
         let decrypted = decrypt_paths(
             &master,
             &DecryptRequest {
-                paths: &[destination.clone()],
+                paths: std::slice::from_ref(destination),
                 recursive: false,
                 output: Some(&dir.0.join("out")),
                 force: false,
@@ -696,7 +812,7 @@ mod tests {
         decrypt_paths(
             &opened,
             &DecryptRequest {
-                paths: &[destination.clone()],
+                paths: std::slice::from_ref(destination),
                 recursive: false,
                 output: Some(&out),
                 force: false,
@@ -786,7 +902,7 @@ mod tests {
         let err = encrypt_paths(
             &master,
             &EncryptRequest {
-                paths: &[source.clone()],
+                paths: std::slice::from_ref(&source),
                 recursive: false,
                 output: Some(&blocker),
                 remove_source: true,
@@ -815,7 +931,7 @@ mod tests {
         decrypt_paths(
             &master,
             &DecryptRequest {
-                paths: &[destination.clone()],
+                paths: std::slice::from_ref(destination),
                 recursive: false,
                 output: Some(&out),
                 force: false,
@@ -840,7 +956,7 @@ mod tests {
         let err = encrypt_paths(
             &master,
             &EncryptRequest {
-                paths: &[nested.clone()],
+                paths: std::slice::from_ref(&nested),
                 recursive: false,
                 output: None,
                 remove_source: false,
@@ -892,7 +1008,7 @@ mod tests {
         decrypt_paths(
             &master,
             &DecryptRequest {
-                paths: &[destination.clone()],
+                paths: std::slice::from_ref(destination),
                 recursive: false,
                 output: Some(&out),
                 force: false,

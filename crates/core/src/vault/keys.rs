@@ -45,7 +45,8 @@ pub fn recipient_from_hmac(hmac: &[u8; 32]) -> Result<String, Error> {
 
 /// Encrypt the master secret to an age x25519 recipient.
 pub fn seal_mask(master: &Master, recipient: &str) -> Result<Vec<u8>, Error> {
-    let recipient = Recipient::from_str(recipient).map_err(|_| Error::InvalidConfig)?;
+    let recipient = Recipient::from_str(recipient)
+        .map_err(|_| Error::InvalidConfig("recipient does not parse".into()))?;
     let encryptor = Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))
         .expect("a single x25519 recipient is valid");
     let mut output = Vec::new();

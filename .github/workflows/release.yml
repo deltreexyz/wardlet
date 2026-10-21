@@ -1,0 +1,44 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - run: cargo test --workspace
+      - run: cargo build --release
+      - name: Stage release files
+        run: |
+          mkdir -p dist
+          install -m 755 target/release/wardlet dist/wardlet
+          cp packaging/udev/99-wardlet-fido2.rules dist/
+          cat > dist/INSTALL.md <<'EOF'
+          # Installing Wardlet
+
+          1. Put `wardlet` somewhere on your PATH, for example:
+             `install -m 755 wardlet ~/.local/bin/wardlet`
+          2. Give your user access to FIDO2 keys (hidraw):
+             `sudo install -m 644 99-wardlet-fido2.rules /etc/udev/rules.d/`
+             then `sudo udevadm control --reload-rules` and re-plug your key.
+          3. Run `wardlet init`.
+
+          Needs a Linux x86_64 system with glibc 2.34 or newer.
+          EOF
+          cd dist && sha256sum wardlet > wardlet.sha256
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/wardlet dist/wardlet.sha256 dist/99-wardlet-fido2.rules dist/INSTALL.md \
+            --title "Wardlet ${GITHUB_REF_NAME}" \
+            --notes "Wardlet ${GITHUB_REF_NAME}. See INSTALL.md in the assets for setup, and CHANGELOG.md in the repository for what changed."

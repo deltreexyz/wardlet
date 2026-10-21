@@ -44,7 +44,7 @@ pub fn rotate_vault(dir: &Path, current: &Master) -> Result<String, Error> {
         .filter(|key| key.mechanism == FIDO2_MECHANISM)
     {
         if key.recipient.is_empty() {
-            return Err(Error::InvalidConfig);
+            return Err(Error::InvalidConfig("a key row has no recipient".into()));
         }
         let wrapped = keys::seal_mask(&next, &key.recipient)?;
         let path = dir.join("keys").join(format!("{}.mask", key.id));
@@ -80,12 +80,28 @@ pub fn masters_covering(dir: &Path, unlocked: Master) -> Result<Vec<Master>, Err
     let mut epoch = epoch_number(&config, &unlocked.recipient())?;
     let mut chain = vec![unlocked];
     while epoch > 1 {
-        let path = dir.join("epochs").join(format!("{}.age", epoch - 1));
+        let relative = format!("epochs/{}.age", epoch - 1);
+        let path = dir.join(&relative);
         if !path.is_file() {
-            break;
+            return Err(Error::Other(format!(
+                "vault is missing {relative}; this copy is incomplete. Import the vault again."
+            )));
         }
         let bytes = fs::read(&path).map_err(Error::io)?;
-        let older = keys::open_mask(&bytes, chain.last().expect("chain is non-empty"))?;
+        let older = keys::open_mask(&bytes, chain.last().expect("chain is non-empty"))
+            .map_err(|err| Error::Other(format!("{relative} cannot be opened: {err}")))?;
+        if let Some(generation) = config
+            .generations
+            .iter()
+            .find(|generation| generation.epoch == epoch - 1)
+        {
+            if older.recipient() != generation.recipient {
+                return Err(Error::Other(format!(
+                    "{relative} does not match the vault record for version {}",
+                    epoch - 1
+                )));
+            }
+        }
         epoch -= 1;
         chain.push(older);
     }
@@ -308,6 +324,19 @@ mod tests {
         assert_eq!(format::vault_version(&config), 3);
         let chain = masters_covering(&vault, unlock_with_hmac(&vault, &hmac).unwrap()).unwrap();
         assert_eq!(chain.len(), 3);
+    }
+
+    #[test]
+    fn a_missing_epoch_file_is_named() {
+        let dir = TempDir::new();
+        let vault = dir.0.join("vault");
+        let hmac = [0x32u8; 32];
+        let created = init_hardware_vault(&vault, "one", &hmac, &params("one")).unwrap();
+        rotate_vault(&vault, &created.master).unwrap();
+        fs::remove_file(vault.join("epochs").join("1.age")).unwrap();
+        let latest = unlock_with_hmac(&vault, &hmac).unwrap();
+        let err = masters_covering(&vault, latest).unwrap_err();
+        assert!(err.to_string().contains("epochs/1.age"), "{err}");
     }
 
     #[test]

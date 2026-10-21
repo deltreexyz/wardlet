@@ -16,6 +16,21 @@ This is early.
 
 `wardlet status` prints the vault version without unlocking. Version 1 has never been updated after creation.
 
+## Install
+
+Download `wardlet` and the udev rule from the
+[latest release](https://github.com/deltreexyz/wardlet/releases), check the
+SHA256 checksum, then:
+
+```bash
+install -m 755 wardlet ~/.local/bin/wardlet
+sudo install -m 644 99-wardlet-fido2.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
+```
+
+Re-plug your key, then run `wardlet init`. Linux x86_64 with glibc 2.34 or
+newer is needed.
+
 ## Build
 
 Rust 1.85 or newer.
@@ -26,6 +41,11 @@ cargo build --release
 ```
 
 The binary is `target/release/wardlet`.
+
+See [CHANGELOG.md](CHANGELOG.md) for releases, [SECURITY.md](SECURITY.md)
+for the threat model and how to report a problem, and
+[docs/manual-hardware-checklist.md](docs/manual-hardware-checklist.md) for
+the hardware checks run before a release.
 
 ## License
 

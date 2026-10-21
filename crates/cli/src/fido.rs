@@ -420,6 +420,10 @@ fn parse_make_credential_response(
     Ok((id, public_key))
 }
 
+fn map_ctap(err: ctap_fido2::error::Error) -> Error {
+    Error::Other(format!("FIDO2: {err}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::make_credential_parameters;
@@ -439,8 +443,4 @@ mod tests {
         let encoded = ctap_fido2::cbor::encode(&request).unwrap();
         assert!(!encoded.windows(2).any(|window| window == b"uv"));
     }
-}
-
-fn map_ctap(err: ctap_fido2::error::Error) -> Error {
-    Error::Other(format!("FIDO2: {err}"))
 }
