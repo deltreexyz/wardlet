@@ -33,7 +33,7 @@ newer is needed.
 
 ## Build
 
-Rust 1.85 or newer.
+Rust 1.95 or newer.
 
 ```bash
 cargo test --workspace
