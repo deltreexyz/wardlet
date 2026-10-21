@@ -1,11 +1,13 @@
 //! The age x25519 master identity.
 //!
 //! Files encrypt to its public recipient. The secret stays in memory for one
-//! command. `age::x25519::Identity` does not implement `Zeroize`, so the
-//! bech32 string is the buffer that is locked and cleared.
+//! command. `age::x25519::Identity` does not implement `Zeroize`, so that copy
+//! is not wiped. The bech32 string is the buffer that is locked and cleared.
+//! If locking fails, the command says so once and does not print the secret.
 
 use std::fmt;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use age::secrecy::{ExposeSecret, SecretString};
 use age::x25519::Identity;
@@ -43,6 +45,9 @@ impl Master {
 
     fn from_parts(identity: Identity, secret: SecretString) -> Self {
         let locked = lock_secret(&secret);
+        if !locked {
+            note_mlock_failed();
+        }
         Self {
             identity,
             secret,
@@ -95,6 +100,14 @@ fn unlock_secret(secret: &SecretString) {
 
 #[cfg(not(target_os = "linux"))]
 fn unlock_secret(_secret: &SecretString) {}
+
+fn note_mlock_failed() {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if WARNED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    eprintln!("wardlet: the master could not be kept out of swap");
+}
 
 #[cfg(test)]
 mod tests {

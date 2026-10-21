@@ -1882,6 +1882,7 @@ name = "wardlet-core"
 version = "0.1.0"
 dependencies = [
  "age",
+ "age-core",
  "bech32",
  "hkdf",
  "libc",

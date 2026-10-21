@@ -12,14 +12,8 @@ pub enum Error {
     #[error("vault already exists")]
     VaultExists,
 
-    #[error("wrong passphrase")]
+    #[error("this key or recovery code does not open this vault")]
     WrongPassphrase,
-
-    #[error("passphrases did not match")]
-    PassphraseMismatch,
-
-    #[error("a passphrase is required")]
-    PassphraseRequired,
 
     #[error(
         "no FIDO2 key with hmac-secret found (plug one in, check hidraw permissions / udev rules, or the key may lack hmac-secret)"
@@ -68,9 +62,7 @@ impl Error {
             Error::HardwareKeyNotFound => 12,
             Error::WrongPassphrase => 14,
             Error::VaultExists | Error::Collision | Error::Io(_) => 16,
-            Error::PassphraseMismatch
-            | Error::PassphraseRequired
-            | Error::LastMember
+            Error::LastMember
             | Error::DuplicateLabel(_)
             | Error::UnknownMember(_)
             | Error::LabelRequired

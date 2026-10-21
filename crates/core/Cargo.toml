@@ -10,6 +10,7 @@ repository.workspace = true
 
 [dependencies]
 age = "0.12"
+age-core = "0.12"
 bech32 = "0.11"
 hkdf = "0.12"
 libc = "0.2.189"

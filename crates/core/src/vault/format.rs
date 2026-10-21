@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use crate::Error;
 
 pub const FORMAT_VERSION: u32 = 1;
+/// On-disk layout once a vault has been given a later master.
+pub const FORMAT_VERSION_CHAIN: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Config {
@@ -13,6 +15,12 @@ pub struct Config {
     pub vault_id: String,
     pub auth_mode: String,
     pub master_recipient: String,
+    /// 1 until a later config visit creates the next master. Missing on older files.
+    #[serde(default)]
+    pub epoch: u32,
+    /// Public recipient of each earlier master. The current one is `master_recipient`.
+    #[serde(default)]
+    pub generations: Vec<Generation>,
     #[serde(default)]
     pub settings: Settings,
     #[serde(default)]
@@ -20,6 +28,12 @@ pub struct Config {
     /// Set after the recovery code unlocks the vault, until a new code replaces it.
     #[serde(default)]
     pub recovery_replacement_due: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Generation {
+    pub epoch: u32,
+    pub recipient: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -44,16 +58,16 @@ pub struct KeyEntry {
     pub id: String,
     pub label: String,
     pub mechanism: String,
-    /// Public age recipient for a hardware user. Empty for a passphrase user.
+    /// Public age recipient for a hardware key. Empty for the recovery code.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub recipient: String,
-    /// FIDO2 credential id (hex). Empty for passphrase users.
+    /// FIDO2 credential id (hex). Empty for the recovery code.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub credential_id: String,
-    /// Relying-party id used at registration. Empty for passphrase users.
+    /// Relying-party id used at registration. Empty for the recovery code.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub rp_id: String,
-    /// 32-byte hmac-secret salt (hex). Empty for passphrase users.
+    /// 32-byte hmac-secret salt (hex). Empty for the recovery code.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub salt: String,
     /// Credential public key as COSE bytes (hex). Needed to call get_hmac_secret again.
@@ -70,23 +84,6 @@ pub struct KeyEntry {
 }
 
 impl KeyEntry {
-    pub fn passphrase(id: String, label: String) -> Self {
-        Self {
-            id,
-            label,
-            mechanism: "passphrase".into(),
-            recipient: String::new(),
-            credential_id: String::new(),
-            rp_id: String::new(),
-            salt: String::new(),
-            public_key: String::new(),
-            key_product: String::new(),
-            last_used: utc_now(),
-            created: utc_now(),
-            role: "member".into(),
-        }
-    }
-
     pub fn fido2_hmac(
         id: String,
         label: String,
@@ -169,8 +166,10 @@ impl Config {
         Self {
             format_version: FORMAT_VERSION,
             vault_id: random_vault_id(),
-            auth_mode: "passphrase".into(),
+            auth_mode: "fido2-hmac".into(),
             master_recipient: master_recipient.into(),
+            epoch: 1,
+            generations: Vec::new(),
             settings: Settings::default(),
             keys: Vec::new(),
             recovery_replacement_due: false,
@@ -184,10 +183,15 @@ impl Config {
 
 pub fn load_config(text: &str) -> Result<Config, Error> {
     let config: Config = toml::from_str(text).map_err(|_| Error::InvalidConfig)?;
-    if config.format_version != FORMAT_VERSION {
+    if config.format_version != FORMAT_VERSION && config.format_version != FORMAT_VERSION_CHAIN {
         return Err(Error::UnsupportedFormat(config.format_version));
     }
     Ok(config)
+}
+
+/// User-facing vault version. Older files omit `epoch` and are version 1.
+pub fn vault_version(config: &Config) -> u32 {
+    if config.epoch == 0 { 1 } else { config.epoch }
 }
 
 fn random_vault_id() -> String {
@@ -201,13 +205,22 @@ mod tests {
     use super::{Config, load_config};
 
     #[test]
-    fn format_version_2_refuses_to_open() {
+    fn format_version_3_refuses_to_open() {
         let mut config = Config::new("age1example");
-        config.format_version = 2;
+        config.format_version = 3;
         let text = config.to_toml().unwrap();
         let err = load_config(&text).unwrap_err();
-        assert!(matches!(err, crate::Error::UnsupportedFormat(2)));
+        assert!(matches!(err, crate::Error::UnsupportedFormat(3)));
         assert_eq!(err.exit_code(), 1);
+    }
+
+    #[test]
+    fn format_version_2_is_the_chain_layout() {
+        let mut config = Config::new("age1example");
+        config.format_version = 2;
+        config.epoch = 2;
+        let loaded = load_config(&config.to_toml().unwrap()).unwrap();
+        assert_eq!(super::vault_version(&loaded), 2);
     }
 
     #[test]
@@ -216,7 +229,8 @@ mod tests {
         let text = config.to_toml().unwrap();
         let loaded = load_config(&text).unwrap();
         assert_eq!(loaded.format_version, 1);
-        assert_eq!(loaded.auth_mode, "passphrase");
+        assert_eq!(super::vault_version(&loaded), 1);
+        assert_eq!(loaded.auth_mode, "fido2-hmac");
         assert!(loaded.keys.is_empty());
         assert!(!text.contains("AGE-SECRET-KEY"));
     }

@@ -30,7 +30,7 @@ pub fn enroll_hardware_member(_user_label: &str) -> Result<EnrolledHmac, Error> 
     debug::log(&format!(
         "makeCredential on {key_product}, rp {DEFAULT_RP_ID}, uv option omitted"
     ));
-    let pin = prompt_pin_if_needed(&mut auth, &key_product)?;
+    let pin = prompt_pin_if_needed(&mut auth, &key_product, true)?;
     let pin_ref = pin.as_deref();
 
     let mut salt = [0u8; 32];
@@ -87,8 +87,8 @@ pub fn enroll_hardware_member(_user_label: &str) -> Result<EnrolledHmac, Error> 
     })
 }
 
-/// Ask the key that already belongs to this user for hmac-secret.
-pub fn derive_hmac_for_unlock(params: &HardwareMemberParams) -> Result<[u8; 32], Error> {
+/// Ask whichever enrolled key is plugged in for hmac-secret.
+fn derive_hmac_from_connected_key(targets: &[HardwareMemberParams]) -> Result<[u8; 32], Error> {
     let devices = device::list_devices().map_err(map_ctap)?;
     debug::log(&format!(
         "found {} FIDO2 device(s) for unlock",
@@ -97,65 +97,71 @@ pub fn derive_hmac_for_unlock(params: &HardwareMemberParams) -> Result<[u8; 32],
     if devices.is_empty() {
         return Err(Error::HardwareKeyNotFound);
     }
-    let enrolled = if params.key_product.is_empty() {
-        params.label.clone()
-    } else {
-        format!("{} ({})", params.key_product, params.label)
-    };
-    let candidates: Vec<_> = devices
-        .into_iter()
-        .filter(|device| device_matches_product(device, &params.key_product))
-        .collect();
-    if candidates.is_empty() {
-        return Err(Error::Other(format!(
-            "plug in {enrolled} to unlock. A different key is connected, and it does not hold this user"
-        )));
-    }
 
-    let mut last_err = Error::Other(format!("{enrolled} did not unlock the vault"));
-    for info in candidates {
+    let mut saw_enrolled_product = false;
+    for info in devices {
         let product = device_product(&info);
-        debug::log(&format!("opening {product} for {enrolled}"));
+        let candidates: Vec<_> = targets
+            .iter()
+            .filter(|params| device_matches_product(&info, &params.key_product))
+            .collect();
+        if candidates.is_empty() {
+            debug::log(&format!("{product} does not match an enrolled key"));
+            continue;
+        }
+        saw_enrolled_product = true;
+        debug::log(&format!(
+            "opening {product} against {} enrolled credential(s)",
+            candidates.len()
+        ));
         let mut auth = Authenticator::open(&info).map_err(map_ctap)?;
         check_pin_protocol(&mut auth)?;
-        eprintln!("Unlock with {enrolled}.");
-        let pin = prompt_pin_if_needed(&mut auth, &product)?;
+        let pin = prompt_pin_if_needed(&mut auth, "", false)?;
         let pin_ref = pin.as_deref();
-        let public_key =
-            CredentialPublicKey::from_cose_bytes(params.public_key.clone()).map_err(map_ctap)?;
-        let mut client_data_hash = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut client_data_hash);
-        eprintln!("Touch {product} ({}) to unlock…", params.label);
-        let req = HmacSecretRequest {
-            rp_id: &params.rp_id,
-            client_data_hash: &client_data_hash,
-            cred_id: &params.credential_id,
-            salt: &params.salt,
-            salt2: None,
-            pin: pin_ref,
-            public_key: Some(&public_key),
-            request_cred_blob: false,
-        };
-        let response = match auth.get_hmac_secret(&req) {
-            Ok(response) => response,
-            Err(err) if is_no_credentials(&err) => {
-                debug::log(&format!("{product} has no credential for {enrolled}"));
-                last_err = Error::Other(format!(
-                    "{product} does not hold {enrolled}. Touch the key named above"
-                ));
-                continue;
+        eprintln!("Touch the key to unlock…");
+        for params in candidates {
+            let public_key = CredentialPublicKey::from_cose_bytes(params.public_key.clone())
+                .map_err(map_ctap)?;
+            let mut client_data_hash = [0u8; 32];
+            rand::rngs::OsRng.fill_bytes(&mut client_data_hash);
+            let req = HmacSecretRequest {
+                rp_id: &params.rp_id,
+                client_data_hash: &client_data_hash,
+                cred_id: &params.credential_id,
+                salt: &params.salt,
+                salt2: None,
+                pin: pin_ref,
+                public_key: Some(&public_key),
+                request_cred_blob: false,
+            };
+            let response = match auth.get_hmac_secret(&req) {
+                Ok(response) => response,
+                Err(err) if is_no_credentials(&err) => {
+                    debug::log("credential is not on this key");
+                    continue;
+                }
+                Err(err) => return Err(map_ctap(err)),
+            };
+            let hmac = response.secret.0;
+            debug::log("hmac-secret received");
+            let mut pin = pin;
+            if let Some(ref mut value) = pin {
+                value.zeroize();
             }
-            Err(err) => return Err(map_ctap(err)),
-        };
-        let hmac = response.secret.0;
-        debug::log("hmac-secret received");
+            return Ok(hmac);
+        }
         let mut pin = pin;
         if let Some(ref mut value) = pin {
             value.zeroize();
         }
-        return Ok(hmac);
     }
-    Err(last_err)
+    if saw_enrolled_product {
+        Err(Error::Other(
+            "This key is not enrolled in this vault.".into(),
+        ))
+    } else {
+        Err(Error::Other("Plug in one of your FIDO2 keys.".into()))
+    }
 }
 
 fn device_product(info: &device::DeviceInfo) -> String {
@@ -179,43 +185,17 @@ fn is_no_credentials(err: &ctap_fido2::error::Error) -> bool {
     )
 }
 
-/// Unlock with the only enrolled key, or ask which key when there are several.
+/// Unlock with whichever enrolled key is plugged in. The key list stays hidden.
 pub fn unlock_vault_with_hardware(dir: &std::path::Path) -> Result<Master, Error> {
     let targets = vault::list_hardware_params(dir)?;
     if targets.is_empty() {
         return Err(Error::Other("vault has no hardware user".into()));
     }
-    let chosen = if targets.len() == 1 {
-        targets.into_iter().next().expect("len checked")
-    } else {
-        choose_enrolled_key(targets)?
-    };
-    let mut hmac = derive_hmac_for_unlock(&chosen)?;
+    eprintln!("Unlock with one of your FIDO2 keys.");
+    let mut hmac = derive_hmac_from_connected_key(&targets)?;
     let result = vault::unlock_with_hmac(dir, &hmac);
     hmac.zeroize();
     result
-}
-
-fn choose_enrolled_key(targets: Vec<HardwareMemberParams>) -> Result<HardwareMemberParams, Error> {
-    println!("Choose the key to unlock the vault:");
-    println!("     Label\tKey");
-    for (index, params) in targets.iter().enumerate() {
-        let product = if params.key_product.is_empty() {
-            "FIDO2 authenticator"
-        } else {
-            params.key_product.as_str()
-        };
-        println!("  {}) {}\t{product}", index + 1, params.label);
-    }
-    let choice = prompt_line("Number of the key")?;
-    let index: usize = choice
-        .trim()
-        .parse()
-        .map_err(|_| Error::Other("enter a key number from the list".into()))?;
-    if index == 0 || index > targets.len() {
-        return Err(Error::Other("enter a key number from the list".into()));
-    }
-    Ok(targets.into_iter().nth(index - 1).expect("bounds checked"))
 }
 
 fn open_selected_device() -> Result<(Authenticator, String), Error> {
@@ -293,12 +273,24 @@ fn check_pin_protocol(auth: &mut Authenticator) -> Result<(), Error> {
     Ok(())
 }
 
-fn prompt_pin_if_needed(auth: &mut Authenticator, key_name: &str) -> Result<Option<String>, Error> {
+fn prompt_pin_if_needed(
+    auth: &mut Authenticator,
+    key_name: &str,
+    enrollment: bool,
+) -> Result<Option<String>, Error> {
     let info = auth.info().map_err(map_ctap)?;
     if !info.client_pin_set() {
+        if enrollment {
+            eprintln!("This key has no FIDO2 PIN. A stolen key can unlock this vault.");
+        }
         return Ok(None);
     }
-    let pin = rpassword::prompt_password(&format!("PIN for {key_name}: ")).map_err(Error::io)?;
+    let prompt = if key_name.is_empty() {
+        "PIN: ".to_owned()
+    } else {
+        format!("PIN for {key_name}: ")
+    };
+    let pin = rpassword::prompt_password(prompt).map_err(Error::io)?;
     if pin.is_empty() {
         return Err(Error::Other(
             "this hardware key has a FIDO2 PIN; enter the same PIN websites ask for".into(),

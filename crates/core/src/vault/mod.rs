@@ -4,31 +4,35 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use age::secrecy::SecretString;
 use rand::RngCore;
 
 use crate::Error;
+use crate::master::Master;
 
+pub mod bundle;
+pub mod epochs;
 pub mod format;
 pub mod keys;
 pub mod members;
+pub(crate) mod names;
 
-pub use format::{Config, FORMAT_VERSION, load_config};
+pub use bundle::{copy_vault, export_vault, import_vault};
+pub use epochs::{is_latest_master, masters_covering, rotate_vault};
+pub use format::{Config, FORMAT_VERSION, load_config, vault_version};
 pub use members::{
     DEFAULT_RP_ID, FIDO2_MECHANISM, HardwareMemberParams, MemberInfo, RECOVERY_MECHANISM,
-    add_hardware_member_unlocked, add_passphrase_member, add_passphrase_member_unlocked,
-    commit_recovery_wrapper, has_hardware_member, has_passphrase_member, list_hardware_params,
-    list_members, recovery_replacement_due, remove_member, remove_member_unlocked,
-    stage_recovery_wrapper, unlock_with_hmac, unlock_with_passphrase, unlock_with_recovery_code,
+    add_hardware_member_unlocked, commit_recovery_wrapper, has_hardware_member,
+    list_hardware_params, list_members, list_members_unlocked, recovery_replacement_due,
+    remove_member_unlocked, stage_recovery_wrapper, unlock_with_hmac, unlock_with_recovery_code,
 };
 
 #[derive(Debug)]
 pub struct CreatedVault {
     pub dir: PathBuf,
     pub recipient: String,
-    /// Master bech32 for DEBUG print only. Never written to disk.
-    pub debug_master_secret: String,
-    /// Shown once at hardware vault creation. Empty for a passphrase vault.
+    /// Live master for this command. Not written to disk.
+    pub master: Master,
+    /// Shown once at vault creation.
     pub recovery_code: String,
 }
 
@@ -47,11 +51,12 @@ pub fn default_dir() -> Result<PathBuf, Error> {
         .join("vault"))
 }
 
-pub fn init_vault(dir: &Path, label: &str, passphrase: &str) -> Result<CreatedVault, Error> {
-    if passphrase.is_empty() {
-        return Err(Error::PassphraseRequired);
-    }
-    let passphrase = SecretString::from(passphrase.to_owned());
+pub fn init_hardware_vault(
+    dir: &Path,
+    label: &str,
+    hmac: &[u8; 32],
+    params: &HardwareMemberParams,
+) -> Result<CreatedVault, Error> {
     if dir.exists() {
         return Err(Error::VaultExists);
     }
@@ -60,7 +65,7 @@ pub fn init_vault(dir: &Path, label: &str, passphrase: &str) -> Result<CreatedVa
     fs::create_dir_all(parent).map_err(Error::io)?;
 
     let tmp = parent.join(temporary_name(dir));
-    let (recipient, debug_master_secret) = match write_vault(&tmp, label, &passphrase) {
+    let (recipient, master, recovery_code) = match write_hardware_vault(&tmp, label, hmac, params) {
         Ok(result) => result,
         Err(err) => {
             let _ = fs::remove_dir_all(&tmp);
@@ -81,64 +86,9 @@ pub fn init_vault(dir: &Path, label: &str, passphrase: &str) -> Result<CreatedVa
     Ok(CreatedVault {
         dir: dir.to_path_buf(),
         recipient,
-        debug_master_secret,
-        recovery_code: String::new(),
-    })
-}
-
-pub fn init_hardware_vault(
-    dir: &Path,
-    label: &str,
-    hmac: &[u8; 32],
-    params: &HardwareMemberParams,
-) -> Result<CreatedVault, Error> {
-    if dir.exists() {
-        return Err(Error::VaultExists);
-    }
-    let parent = dir.parent().filter(|path| !path.as_os_str().is_empty());
-    let parent = parent.unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent).map_err(Error::io)?;
-
-    let tmp = parent.join(temporary_name(dir));
-    let (recipient, debug_master_secret, recovery_code) =
-        match write_hardware_vault(&tmp, label, hmac, params) {
-            Ok(result) => result,
-            Err(err) => {
-                let _ = fs::remove_dir_all(&tmp);
-                return Err(err);
-            }
-        };
-
-    fs::rename(&tmp, dir).map_err(|err| {
-        let _ = fs::remove_dir_all(&tmp);
-        if err.kind() == std::io::ErrorKind::AlreadyExists {
-            Error::VaultExists
-        } else {
-            Error::io(err)
-        }
-    })?;
-    sync_dir(parent)?;
-
-    Ok(CreatedVault {
-        dir: dir.to_path_buf(),
-        recipient,
-        debug_master_secret,
+        master,
         recovery_code,
     })
-}
-
-fn write_vault(
-    dir: &Path,
-    label: &str,
-    passphrase: &SecretString,
-) -> Result<(String, String), Error> {
-    let (recipient, member, debug_secret) = members::write_first_member(dir, label, passphrase)?;
-    let mut config = format::Config::new(&recipient);
-    config.keys.push(member);
-    let text = config.to_toml()?;
-    write_atomic(&dir.join("config.toml"), text.as_bytes())?;
-    sync_dir(dir)?;
-    Ok((recipient, debug_secret))
 }
 
 fn write_hardware_vault(
@@ -146,8 +96,8 @@ fn write_hardware_vault(
     label: &str,
     hmac: &[u8; 32],
     params: &HardwareMemberParams,
-) -> Result<(String, String, String), Error> {
-    let (recipient, member, debug_secret, recovery, recovery_code) =
+) -> Result<(String, Master, String), Error> {
+    let (recipient, member, master, recovery, recovery_code) =
         members::write_first_hardware_member(dir, label, hmac, params)?;
     let mut config = format::Config::new(&recipient);
     config.auth_mode = FIDO2_MECHANISM.into();
@@ -156,7 +106,7 @@ fn write_hardware_vault(
     let text = config.to_toml()?;
     write_atomic(&dir.join("config.toml"), text.as_bytes())?;
     sync_dir(dir)?;
-    Ok((recipient, debug_secret, recovery_code))
+    Ok((recipient, master, recovery_code))
 }
 
 fn temporary_name(dir: &Path) -> String {
@@ -219,13 +169,10 @@ pub(crate) fn sync_dir(path: &Path) -> Result<(), Error> {
 mod tests {
     use std::fs;
 
-    use age::secrecy::SecretString;
     use rand::RngCore;
 
-    use super::{init_hardware_vault, init_vault};
+    use super::init_hardware_vault;
     use crate::Error;
-    use crate::crypto::passphrase::open_recovery;
-    use crate::vault::format::load_config;
     use crate::vault::members::HardwareMemberParams;
 
     struct TempDir(std::path::PathBuf);
@@ -247,40 +194,6 @@ mod tests {
     }
 
     #[test]
-    fn init_writes_a_vault_that_opens_with_the_passphrase() {
-        let dir = TempDir::new();
-        let passphrase = SecretString::from("test passphrase".to_owned());
-        let created = init_vault(&dir.0, "personal", "test passphrase").unwrap();
-
-        let config_text = fs::read_to_string(dir.0.join("config.toml")).unwrap();
-        let config = load_config(&config_text).unwrap();
-        assert_eq!(config.master_recipient, created.recipient);
-        assert_eq!(config.auth_mode, "passphrase");
-        assert_eq!(config.keys.len(), 1);
-        assert_eq!(config.keys[0].label, "personal");
-        assert_eq!(config.keys[0].mechanism, "passphrase");
-        assert!(!config_text.contains("AGE-SECRET-KEY"));
-        assert!(!config_text.contains(&created.debug_master_secret));
-        assert!(!dir.0.join("recovery.age").exists());
-
-        let recovery = fs::read(
-            dir.0
-                .join("keys")
-                .join(format!("{}.age", config.keys[0].id)),
-        )
-        .unwrap();
-        assert!(recovery.starts_with(b"age-encryption.org/v1\n"));
-        assert!(!recovery.windows(15).any(|bytes| bytes == b"AGE-SECRET-KEY"));
-
-        let opened = open_recovery(&recovery, &passphrase).unwrap();
-        assert_eq!(opened.recipient(), created.recipient);
-
-        let err = init_vault(&dir.0, "personal", "test passphrase").unwrap_err();
-        assert!(matches!(err, Error::VaultExists));
-        assert_eq!(err.exit_code(), 16);
-    }
-
-    #[test]
     fn init_hardware_vault_does_not_persist_secrets() {
         let dir = TempDir::new();
         let hmac = [0x7Eu8; 32];
@@ -295,7 +208,7 @@ mod tests {
         let created = init_hardware_vault(&dir.0, "card", &hmac, &params).unwrap();
         let config_text = fs::read_to_string(dir.0.join("config.toml")).unwrap();
         assert!(!config_text.contains("AGE-SECRET-KEY"));
-        assert!(!config_text.contains(&created.debug_master_secret));
+        assert!(!config_text.contains(created.master.expose_secret()));
         let hmac_hex: String = hmac.iter().map(|b| format!("{b:02x}")).collect();
         assert!(!config_text.contains(&hmac_hex));
         assert!(matches!(

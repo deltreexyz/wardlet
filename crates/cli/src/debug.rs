@@ -1,8 +1,7 @@
 //! Step logging for `--debug`. Off unless that flag is set.
 //!
-//! Lines go to stderr. They name the step. They do not include passphrases,
-//! PINs, or recovery codes. The vault-creation banner is the one place that
-//! prints the master and hmac, and only when this flag is on.
+//! Lines go to stderr. They name the step. They do not include the master
+//! key, PINs, or recovery codes.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
