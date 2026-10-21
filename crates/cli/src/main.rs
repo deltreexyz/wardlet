@@ -18,7 +18,7 @@ use zeroize::Zeroize;
 #[command(
     name = "wardlet",
     version,
-    about = "Encrypt files where they are. A FIDO2-compatible key unlocks them.",
+    about = "A stolen laptop shouldn't hand over your files. Lock any file with the security key you already own.",
     after_help = "\
 Examples:
   wardlet init               First run. Create the vault and enroll a FIDO2 key
@@ -1275,7 +1275,7 @@ fn vault_dir(dir: Option<PathBuf>) -> Result<PathBuf, Error> {
 }
 
 fn print_fido2_requirement() {
-    println!("Use a FIDO2-compatible key.");
+    println!("Use a security key.");
     println!("Supported devices: https://wardlet.com/#devices");
     println!();
 }
@@ -1288,7 +1288,7 @@ fn print_authorized_keys(members: &[MemberInfo]) {
 
 fn print_banner() {
     println!(
-        "Wardlet {}\nEncrypt files where they are. A FIDO2 key unlocks them.\n",
+        "Wardlet {}\nLock any file with the security key you already own.\n",
         env!("CARGO_PKG_VERSION")
     );
 }

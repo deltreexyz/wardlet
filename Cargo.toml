@@ -8,5 +8,5 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.95"
 publish = false
-description = "Encrypt files where they are. A FIDO2-compatible key unlocks them."
+description = "A stolen laptop shouldn't hand over your files. Lock any file with the security key you already own."
 repository = "https://github.com/deltreexyz/wardlet"
