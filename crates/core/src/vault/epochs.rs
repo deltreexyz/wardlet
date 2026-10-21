@@ -94,13 +94,12 @@ pub fn masters_covering(dir: &Path, unlocked: Master) -> Result<Vec<Master>, Err
             .generations
             .iter()
             .find(|generation| generation.epoch == epoch - 1)
+            && older.recipient() != generation.recipient
         {
-            if older.recipient() != generation.recipient {
-                return Err(Error::Other(format!(
-                    "{relative} does not match the vault record for version {}",
-                    epoch - 1
-                )));
-            }
+            return Err(Error::Other(format!(
+                "{relative} does not match the vault record for version {}",
+                epoch - 1
+            )));
         }
         epoch -= 1;
         chain.push(older);

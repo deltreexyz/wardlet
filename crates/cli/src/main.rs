@@ -260,10 +260,10 @@ fn configure(dir: Option<PathBuf>) -> Result<(), Error> {
     print_banner();
     let mut visit = None;
     let result = configure_visit(&dir, &mut visit);
-    if let Some(visit) = &visit {
-        if visit.scratch.exists() {
-            let _ = std::fs::remove_dir_all(&visit.scratch);
-        }
+    if let Some(visit) = &visit
+        && visit.scratch.exists()
+    {
+        let _ = std::fs::remove_dir_all(&visit.scratch);
     }
     result
 }
@@ -1231,14 +1231,14 @@ fn status(dir: Option<PathBuf>, json: bool) -> Result<(), Error> {
             }
         }
     }
-    if let Some(parent) = dir.parent() {
-        if let Ok(entries) = std::fs::read_dir(parent) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name.starts_with(".wardlet-visit-") || name.starts_with(".wardlet-previous-") {
-                    println!("Leftover: {}", entry.path().display());
-                    problems += 1;
-                }
+    if let Some(parent) = dir.parent()
+        && let Ok(entries) = std::fs::read_dir(parent)
+    {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(".wardlet-visit-") || name.starts_with(".wardlet-previous-") {
+                println!("Leftover: {}", entry.path().display());
+                problems += 1;
             }
         }
     }

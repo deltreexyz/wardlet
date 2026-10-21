@@ -473,13 +473,15 @@ fn decrypt_one(
 }
 
 fn stale_or_foreign(ciphertext: &[u8], vault_id: &str, version: u32, path: &Path) -> String {
-    if let Some(stamp) = read_stamp(ciphertext) {
-        if !vault_id.is_empty() && stamp.vault_id == vault_id && stamp.version > version {
-            return format!(
-                "This file was encrypted with version {} of this vault. This copy is version {version}. Import the newer vault, then decrypt again.",
-                stamp.version
-            );
-        }
+    if let Some(stamp) = read_stamp(ciphertext)
+        && !vault_id.is_empty()
+        && stamp.vault_id == vault_id
+        && stamp.version > version
+    {
+        return format!(
+            "This file was encrypted with version {} of this vault. This copy is version {version}. Import the newer vault, then decrypt again.",
+            stamp.version
+        );
     }
     format!("this vault cannot decrypt {}", path.display())
 }
@@ -632,13 +634,13 @@ fn normalize_suffix(suffix: &str) -> String {
 }
 
 fn create_private_file(path: &Path) -> Result<File, Error> {
-    if let Ok(meta) = fs::symlink_metadata(path) {
-        if meta.file_type().is_symlink() {
-            return Err(Error::Other(format!(
-                "refusing to follow symlink {}",
-                path.display()
-            )));
-        }
+    if let Ok(meta) = fs::symlink_metadata(path)
+        && meta.file_type().is_symlink()
+    {
+        return Err(Error::Other(format!(
+            "refusing to follow symlink {}",
+            path.display()
+        )));
     }
     let mut options = OpenOptions::new();
     options.write(true).create(true).truncate(true);

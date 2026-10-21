@@ -310,26 +310,26 @@ pub fn unlock_with_recovery_code(dir: &Path, typed: &str) -> Result<Master, Erro
         }
     }
     let epochs = dir.join("epochs");
-    if epochs.is_dir() {
-        if let Ok(entries) = fs::read_dir(&epochs) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let Some(name) = name.to_str() else {
+    if epochs.is_dir()
+        && let Ok(entries) = fs::read_dir(&epochs)
+    {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if !(name.starts_with("recovery-") && name.ends_with(".age")) {
+                continue;
+            }
+            let Ok(bytes) = fs::read(entry.path()) else {
+                continue;
+            };
+            match passphrase::open_recovery(&bytes, &secret) {
+                Ok(master) => return Ok(master),
+                Err(Error::WrongPassphrase) => continue,
+                Err(err) => {
+                    structural.get_or_insert(err);
                     continue;
-                };
-                if !(name.starts_with("recovery-") && name.ends_with(".age")) {
-                    continue;
-                }
-                let Ok(bytes) = fs::read(entry.path()) else {
-                    continue;
-                };
-                match passphrase::open_recovery(&bytes, &secret) {
-                    Ok(master) => return Ok(master),
-                    Err(Error::WrongPassphrase) => continue,
-                    Err(err) => {
-                        structural.get_or_insert(err);
-                        continue;
-                    }
                 }
             }
         }
@@ -465,7 +465,7 @@ pub(crate) fn bytes_to_hex(bytes: &[u8]) -> String {
 }
 
 pub fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, Error> {
-    if hex.len() % 2 != 0 {
+    if !hex.len().is_multiple_of(2) {
         return Err(Error::InvalidConfig("a hex field has an odd length".into()));
     }
     (0..hex.len())

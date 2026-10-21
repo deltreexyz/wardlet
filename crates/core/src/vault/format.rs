@@ -217,7 +217,9 @@ fn invalid(message: impl Into<String>) -> Error {
 }
 
 fn is_hex(text: &str) -> bool {
-    !text.is_empty() && text.len() % 2 == 0 && text.bytes().all(|byte| byte.is_ascii_hexdigit())
+    !text.is_empty()
+        && text.len().is_multiple_of(2)
+        && text.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// Semantic checks beyond TOML parsing, so a tampered or truncated config is

@@ -37,10 +37,10 @@ pub struct CreatedVault {
 }
 
 pub fn default_dir() -> Result<PathBuf, Error> {
-    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME") {
-        if !xdg.is_empty() {
-            return Ok(PathBuf::from(xdg).join("wardlet").join("vault"));
-        }
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME")
+        && !xdg.is_empty()
+    {
+        return Ok(PathBuf::from(xdg).join("wardlet").join("vault"));
     }
     let home = std::env::var_os("HOME")
         .filter(|home| !home.is_empty())
