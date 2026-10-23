@@ -208,6 +208,7 @@ mod tests {
                 output: None,
                 remove_source: true,
                 stdout: false,
+                force: false,
                 suffix: ".age",
                 stamp: Some(crate::ops::FileStamp {
                     vault_id: "vault".into(),

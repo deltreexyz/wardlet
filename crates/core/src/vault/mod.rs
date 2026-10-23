@@ -132,6 +132,7 @@ pub(crate) fn create_private_dir(path: &Path) -> Result<(), Error> {
 
 pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     let tmp = path.with_extension("tmp");
+    let _ = fs::remove_file(&tmp);
     let write_result = (|| {
         let mut file = create_private_file(&tmp)?;
         file.write_all(bytes).map_err(Error::io)?;
@@ -150,7 +151,7 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), Error> {
 
 fn create_private_file(path: &Path) -> Result<File, Error> {
     let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;

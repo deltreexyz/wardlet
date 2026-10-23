@@ -66,6 +66,9 @@ enum Command {
         /// Write ciphertext to standard output. The ciphertext is not verified.
         #[arg(long)]
         stdout: bool,
+        /// Replace an existing locked file.
+        #[arg(long)]
+        force: bool,
     },
     /// Decrypt files or directories.
     Dec {
@@ -139,7 +142,16 @@ fn run(cli: Cli) -> Result<(), Error> {
             output,
             remove_source,
             stdout,
-        } => encrypt(cli.dir, &paths, recursive, output, remove_source, stdout),
+            force,
+        } => encrypt(
+            cli.dir,
+            &paths,
+            recursive,
+            output,
+            remove_source,
+            stdout,
+            force,
+        ),
         Command::Dec {
             paths,
             recursive,
@@ -665,6 +677,7 @@ fn encrypt(
     output: Option<PathBuf>,
     remove_source: bool,
     stdout: bool,
+    force: bool,
 ) -> Result<(), Error> {
     debug::log("encrypting named paths");
     let dir = vault_dir(dir)?;
@@ -679,6 +692,7 @@ fn encrypt(
         output: output.as_deref(),
         remove_source,
         stdout,
+        force,
         suffix: &suffix,
         stamp: Some(stamp),
     };
@@ -911,6 +925,7 @@ fn finish_editor_encrypt(
             output: Some(path_parent(ciphertext)),
             remove_source: true,
             stdout: false,
+            force: true,
             suffix,
             stamp: Some(stamp),
         },

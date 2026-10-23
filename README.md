@@ -32,29 +32,22 @@ Under the hood, files are age ciphertext and keys are FIDO2. The source is here 
 
 ## Install
 
-Download `wardlet` and the udev rule from the
-[latest release](https://github.com/deltreexyz/wardlet/releases), check the
-SHA256 checksum, then:
-
-```bash
-install -m 755 wardlet ~/.local/bin/wardlet
-sudo install -m 644 99-wardlet-fido2.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules
-```
-
-Re-plug your key, then run `wardlet init`. Linux x86_64 with glibc 2.34 or
-newer is needed.
-
-## Build
-
-Rust 1.95 or newer.
+Build from source today (a packaged GitHub release comes next):
 
 ```bash
 cargo test --workspace
 cargo build --release
+install -m 755 target/release/wardlet ~/.local/bin/wardlet
+sudo install -m 644 packaging/udev/99-wardlet-fido2.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules
 ```
 
-The binary is `target/release/wardlet`.
+Re-plug your key, then run `wardlet init`. Linux x86_64 with glibc 2.34 or
+newer is needed. Rust 1.95 or newer is needed to build.
+
+When a release is published, you can also download the binary and udev rule
+from [GitHub Releases](https://github.com/deltreexyz/wardlet/releases) and
+check the SHA256 checksum instead of building.
 
 See [CHANGELOG.md](CHANGELOG.md) for releases, [SECURITY.md](SECURITY.md)
 for the threat model and how to report a problem, and

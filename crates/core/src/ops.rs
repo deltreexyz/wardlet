@@ -32,6 +32,8 @@ pub struct EncryptRequest<'a> {
     pub output: Option<&'a Path>,
     pub remove_source: bool,
     pub stdout: bool,
+    /// Replace an existing locked file. Without this, an existing destination is refused.
+    pub force: bool,
     pub suffix: &'a str,
     pub stamp: Option<FileStamp>,
 }
@@ -84,6 +86,9 @@ pub fn encrypt_paths(
             continue;
         }
         let destination = destination_path(&job, &suffix, request.output, true)?;
+        if destination.exists() && !request.force {
+            return Err(Error::Collision);
+        }
         warn_if_newer_than_ciphertext(&job.source, &destination);
         encrypt_one(master, &job.source, &destination, request.stamp.as_ref())?;
         actions.push(FileAction::Wrote {
@@ -128,6 +133,9 @@ pub fn preflight_encrypt(request: &EncryptRequest<'_>) -> Result<(), Error> {
                 "two files would both be written to {}",
                 destination.display()
             )));
+        }
+        if destination.exists() && !request.force {
+            return Err(Error::Collision);
         }
     }
     Ok(())
@@ -347,9 +355,9 @@ fn encrypt_one(
         fs::create_dir_all(parent).map_err(Error::io)?;
     }
     let partial = partial_path(destination);
+    let mut output = create_private_file(&partial)?;
     let write_result = (|| -> Result<Vec<u8>, Error> {
         let mut input = File::open(source).map_err(Error::io)?;
-        let mut output = create_private_file(&partial)?;
         let plain_hash = encrypt_reader(master, &mut input, &mut output, stamp)?;
         output.sync_all().map_err(Error::io)?;
         Ok(plain_hash)
@@ -435,6 +443,7 @@ fn decrypt_one(
         fs::create_dir_all(parent).map_err(Error::io)?;
     }
     let partial = partial_path(destination);
+    let created = std::cell::Cell::new(false);
     let write_result = (|| -> Result<(), Error> {
         for master in masters {
             let identity = Identity::from_str(master.expose_secret())
@@ -448,6 +457,7 @@ fn decrypt_one(
                     Err(_) => continue,
                 };
             let mut output = create_private_file(&partial)?;
+            created.set(true);
             let mut buf = [0u8; 64 * 1024];
             loop {
                 let read = reader.read(&mut buf).map_err(Error::io)?;
@@ -466,7 +476,9 @@ fn decrypt_one(
         )))
     })();
     if let Err(err) = write_result {
-        let _ = fs::remove_file(&partial);
+        if created.get() {
+            let _ = fs::remove_file(&partial);
+        }
         return Err(err);
     }
     replace_file(&partial, destination)
@@ -634,16 +646,20 @@ fn normalize_suffix(suffix: &str) -> String {
 }
 
 fn create_private_file(path: &Path) -> Result<File, Error> {
-    if let Ok(meta) = fs::symlink_metadata(path)
-        && meta.file_type().is_symlink()
-    {
+    if let Ok(meta) = fs::symlink_metadata(path) {
+        if meta.file_type().is_symlink() {
+            return Err(Error::Other(format!(
+                "refusing to follow symlink {}",
+                path.display()
+            )));
+        }
         return Err(Error::Other(format!(
-            "refusing to follow symlink {}",
+            "{} already exists. Remove it, then try again.",
             path.display()
         )));
     }
     let mut options = OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -690,6 +706,15 @@ mod tests {
         path: &std::path::Path,
         remove_source: bool,
     ) -> Vec<FileAction> {
+        encrypt_file_opts(master, path, remove_source, false)
+    }
+
+    fn encrypt_file_opts(
+        master: &Master,
+        path: &std::path::Path,
+        remove_source: bool,
+        force: bool,
+    ) -> Vec<FileAction> {
         encrypt_paths(
             master,
             &EncryptRequest {
@@ -698,6 +723,7 @@ mod tests {
                 output: None,
                 remove_source,
                 stdout: false,
+                force,
                 suffix: ".age",
                 stamp: None,
             },
@@ -724,6 +750,7 @@ mod tests {
             output: Some(&out),
             remove_source: false,
             stdout: false,
+            force: false,
             suffix: ".age",
             stamp: None,
         })
@@ -743,6 +770,54 @@ mod tests {
         })
         .unwrap_err();
         assert!(matches!(err, crate::Error::Collision), "{err}");
+
+        let plain = dir.0.join("again.txt");
+        fs::write(&plain, b"old").unwrap();
+        let locked = dir.0.join("again.txt.age");
+        fs::write(&locked, b"newer locked copy").unwrap();
+        let err = preflight_encrypt(&EncryptRequest {
+            paths: std::slice::from_ref(&plain),
+            recursive: false,
+            output: None,
+            remove_source: false,
+            stdout: false,
+            force: false,
+            suffix: ".age",
+            stamp: None,
+        })
+        .unwrap_err();
+        assert!(matches!(err, crate::Error::Collision), "{err}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_leftover_partial_with_open_permissions_is_refused() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new();
+        let source = dir.0.join("note.txt");
+        fs::write(&source, b"secret").unwrap();
+        let partial = dir.0.join(".note.txt.age.partial");
+        fs::write(&partial, b"planted").unwrap();
+        fs::set_permissions(&partial, fs::Permissions::from_mode(0o666)).unwrap();
+        let master = Master::generate();
+        let err = encrypt_paths(
+            &master,
+            &EncryptRequest {
+                paths: std::slice::from_ref(&source),
+                recursive: false,
+                output: None,
+                remove_source: false,
+                stdout: false,
+                force: false,
+                suffix: ".age",
+                stamp: None,
+            },
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("already exists"), "{err}");
+        assert_eq!(fs::read(&partial).unwrap(), b"planted");
+        let mode = fs::metadata(&partial).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o666);
     }
 
     #[test]
@@ -856,6 +931,7 @@ mod tests {
                 output: None,
                 remove_source: false,
                 stdout: false,
+                force: false,
                 suffix: ".age",
                 stamp: None,
             },
@@ -883,6 +959,7 @@ mod tests {
                 output: None,
                 remove_source: false,
                 stdout: false,
+                force: false,
                 suffix: ".age",
                 stamp: None,
             },
@@ -909,6 +986,7 @@ mod tests {
                 output: Some(&blocker),
                 remove_source: true,
                 stdout: false,
+                force: false,
                 suffix: ".age",
                 stamp: None,
             },
@@ -963,6 +1041,7 @@ mod tests {
                 output: None,
                 remove_source: false,
                 stdout: false,
+                force: false,
                 suffix: ".age",
                 stamp: None,
             },
@@ -979,6 +1058,7 @@ mod tests {
                 output: Some(&out),
                 remove_source: false,
                 stdout: false,
+                force: false,
                 suffix: ".age",
                 stamp: None,
             },
@@ -1002,7 +1082,22 @@ mod tests {
         };
         let first = fs::read(destination).unwrap();
         fs::write(&source, b"second").unwrap();
-        encrypt_file(&master, &source, false);
+        let refused = encrypt_paths(
+            &master,
+            &EncryptRequest {
+                paths: std::slice::from_ref(&source),
+                recursive: false,
+                output: None,
+                remove_source: false,
+                stdout: false,
+                force: false,
+                suffix: ".age",
+                stamp: None,
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(refused, crate::Error::Collision));
+        encrypt_file_opts(&master, &source, false, true);
         let second = fs::read(destination).unwrap();
         assert_ne!(first, second);
         assert!(source.is_file());
@@ -1038,6 +1133,7 @@ mod tests {
                 output: None,
                 remove_source: true,
                 stdout: false,
+                force: true,
                 suffix: ".age",
                 stamp: None,
             },
