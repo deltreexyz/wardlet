@@ -18,7 +18,7 @@ use zeroize::Zeroize;
 #[command(
     name = "wardlet",
     version,
-    about = "A stolen laptop shouldn't hand over your files. Lock any file with the security key you already own.",
+    about = "Your key is the lock. Encrypt files with the security key you already own.",
     after_help = "\
 Examples:
   wardlet init               First run. Create the vault and enroll a FIDO2 key
@@ -1303,7 +1303,7 @@ fn print_authorized_keys(members: &[MemberInfo]) {
 
 fn print_banner() {
     println!(
-        "Wardlet {}\nLock any file with the security key you already own.\n",
+        "Wardlet {}\nYour key is the lock.\n",
         env!("CARGO_PKG_VERSION")
     );
 }
