@@ -35,6 +35,33 @@ Keys that work are listed at [wardlet.com/#devices](https://wardlet.com/#devices
 
 An existing locked file is not overwritten unless you pass `--force`.
 
+## FAQ
+
+**What is Wardlet?**
+A Linux command that encrypts files with a FIDO2 security key you already own. The locked copy sits next to the original. No password, no account, no upload. A desktop app comes later and will open the same files.
+
+**What is it good at?**
+- Your key is the lock: nothing to invent, type, or forget.
+- Several keys open the same files. Add more than one so a lost key is not the end. Adding a key does not rewrite existing locked files.
+- Files stay where they are. No mounted drive, no container.
+- Nothing leaves your machine. Offline, open source, age format.
+
+**What are the limits?**
+- You need a compatible FIDO2 key. Older keys (YubiKey 4, Trezor One, and similar) are not supported. See [wardlet.com/#devices](https://wardlet.com/#devices).
+- The original file stays until you delete it.
+- Removing a key does not rewrite files already locked. See the next question.
+- Wardlet does not protect against malware running as you while a file is decrypted or open in an editor.
+- Linux CLI today. Packaged downloads and other platforms come later.
+
+**If I remove a key, is it revoked from old files?**
+No. Removing a key updates the vault so that key cannot open files locked *after* the change. Files locked before the change are still tied to the earlier vault generation. Anyone with that key and an older vault copy can still open them. To cut a key off: remove it, re-encrypt the files you care about, then delete the old locked copies and any old vault export.
+
+**What if I lose every key?**
+Use the recovery code shown once at setup (and again after you change keys in `wardlet config`). Store it in a password manager. Wardlet keeps no copy. Lose every key and the code, and the locked files cannot be opened.
+
+**Is this a vault or a container?**
+No. Wardlet does not mount a drive or keep your files in one encrypted archive. Each locked file sits next to its original. The “vault” on disk is only the key directory Wardlet uses to unwrap the master key.
+
 ## Install
 
 Build from source today (a packaged GitHub release comes next):
