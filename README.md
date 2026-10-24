@@ -40,6 +40,9 @@ An existing locked file is not overwritten unless you pass `--force`.
 **What is Wardlet?**
 A Linux command that encrypts files with a FIDO2 security key you already own. The locked copy sits next to the original. No password, no account, no upload. A desktop app comes later and will open the same files.
 
+**How is this different from age plus a FIDO plugin?**
+Underneath, Wardlet uses the age format and FIDO2 hmac-secret — the same building blocks as plugins like `age-plugin-fido2-hmac`. The difference is the product around them: Wardlet enrolls several keys and a recovery code in one vault, locks files beside the originals, and lets you add a key without rewriting existing locked files. If you already live in the `age` CLI and manage recipients yourself, a plugin may be enough. Wardlet is for people who want that workflow packaged.
+
 **What is it good at?**
 - Your key is the lock: nothing to invent, type, or forget.
 - Several keys open the same files. Add more than one so a lost key is not the end. Adding a key does not rewrite existing locked files.
