@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 0 1024 1024" width="1024" height="1024">
+<title>Wardlet</title>
+<defs><path id="wardlet-key" fill-rule="evenodd" d="M46 0H222A46 46 0 0 1 268 46V466A46 46 0 0 1 222 512H214A10 10 0 0 0 204 522V580A24 24 0 0 1 180 604H86A24 24 0 0 1 62 580V522A10 10 0 0 0 52 512H46A46 46 0 0 1 0 466V46A46 46 0 0 1 46 0ZM112 267.4A55 55 0 1 1 156 267.4L175.2 362.2Q176.6 370 168.6 370H99.4Q91.4 370 92.8 362.2Z"/></defs>
+<rect width="1024" height="1024" fill="#161616"/>
+<use href="#wardlet-key" xlink:href="#wardlet-key" fill="#E6E6E3" transform="translate(378 210) scale(1)"/>
+</svg>

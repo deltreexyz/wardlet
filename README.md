@@ -1,5 +1,9 @@
 # Wardlet
 
+<p align="center">
+  <img src="docs/assets/wardlet-wordmark-dark.svg" alt="Wardlet" width="420">
+</p>
+
 Your key is the lock.
 
 Wardlet locks files with the security keys you already own. The locked copy sits next to the original, and nothing opens it without your key. No password, no account, no upload.
@@ -11,18 +15,20 @@ Free and open source. A command-line tool for Linux today, with a desktop app la
 Linux only for now. Build from source; packaged releases are next.
 
 ```bash
-cargo build --release
+cargo build --release -p wardlet
 install -m 755 target/release/wardlet ~/.local/bin/wardlet
 ```
 
-This udev rule lets your user account talk to the security key without root:
+If your security key already works for website login (FIDO2), try Wardlet next — no extra setup on most desktops.
+
+If the key is not found or permission is denied, install the bundled udev rule (or your distro’s `libfido2` / FIDO udev package), then re-plug the key:
 
 ```bash
 sudo install -m 644 packaging/udev/99-wardlet-fido2.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules
 ```
 
-Re-plug your keys, then:
+Then:
 
 ```bash
 wardlet init               # register your keys, get a one-time recovery code
@@ -87,6 +93,16 @@ Use the recovery code shown once at setup (and again after you change keys in `w
 
 **Is this an encrypted container?**
 No. There's no mounted drive or container file. Each file is locked on its own, in the standard age format, and stays where it is.
+
+## Desktop app (Linux)
+
+An early GUI shares the same vault and files as the CLI:
+
+```bash
+cargo run -p wardlet-gui
+```
+
+See [crates/gui/README.md](crates/gui/README.md).
 
 ## Development
 

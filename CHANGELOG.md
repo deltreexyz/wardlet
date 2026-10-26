@@ -4,6 +4,8 @@
 
 First public release.
 
+- Early Linux GUI (`wardlet-gui`) links the same core library as the CLI:
+  set up a vault, lock a file, open a locked file.
 - Encrypt and decrypt files where they are (`wardlet enc`, `wardlet dec`),
   unlocked by a FIDO2 hardware key. No key file on disk.
 - `wardlet init` creates a vault and shows one recovery code, once.

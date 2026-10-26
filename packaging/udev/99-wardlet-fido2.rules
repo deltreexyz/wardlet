@@ -1,6 +1,8 @@
 # Wardlet: let the signed-in user reach FIDO2 keys over hidraw.
-# Install: sudo install -m 644 99-wardlet-fido2.rules /etc/udev/rules.d/
-# then:    sudo udevadm control --reload-rules   (and re-plug the key)
+# Usually unnecessary if website FIDO2 already works (distro libfido2 rules).
+# Install only if the key is not found / permission denied:
+#   sudo install -m 644 99-wardlet-fido2.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules   (then re-plug the key)
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1050", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="1209", TAG+="uaccess"
 KERNEL=="hidraw*", SUBSYSTEM=="hidraw", ATTRS{idVendor}=="20a0", TAG+="uaccess"
