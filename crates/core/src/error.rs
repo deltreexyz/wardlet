@@ -6,13 +6,13 @@ use std::process::ExitCode;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("vault not found")]
-    VaultNotFound,
+    #[error("keyring not found")]
+    KeyringNotFound,
 
-    #[error("vault already exists")]
-    VaultExists,
+    #[error("keyring already exists")]
+    KeyringExists,
 
-    #[error("this key or recovery code does not open this vault")]
+    #[error("this key or recovery code does not open this keyring")]
     WrongPassphrase,
 
     #[error(
@@ -35,13 +35,13 @@ pub enum Error {
     #[error("output already exists")]
     Collision,
 
-    #[error("unsupported vault format version {0}")]
+    #[error("unsupported keyring format version {0}")]
     UnsupportedFormat(u32),
 
     #[error("recovery.age is not a valid age file")]
     CorruptRecovery,
 
-    #[error("config.toml is not a valid vault config: {0}")]
+    #[error("config.toml is not a valid keyring config: {0}")]
     InvalidConfig(String),
 
     #[error("{0}")]
@@ -58,10 +58,10 @@ impl Error {
 
     pub fn exit_code(&self) -> u8 {
         match self {
-            Error::VaultNotFound => 10,
+            Error::KeyringNotFound => 10,
             Error::HardwareKeyNotFound => 12,
             Error::WrongPassphrase => 14,
-            Error::VaultExists | Error::Collision | Error::Io(_) => 16,
+            Error::KeyringExists | Error::Collision | Error::Io(_) => 16,
             Error::LastMember
             | Error::DuplicateLabel(_)
             | Error::UnknownMember(_)
@@ -84,10 +84,10 @@ mod tests {
 
     #[test]
     fn exit_codes_match_the_phase0_contract() {
-        assert_eq!(Error::VaultNotFound.exit_code(), 10);
+        assert_eq!(Error::KeyringNotFound.exit_code(), 10);
         assert_eq!(Error::HardwareKeyNotFound.exit_code(), 12);
         assert_eq!(Error::WrongPassphrase.exit_code(), 14);
-        assert_eq!(Error::VaultExists.exit_code(), 16);
+        assert_eq!(Error::KeyringExists.exit_code(), 16);
         assert_eq!(Error::Collision.exit_code(), 16);
         assert_eq!(Error::Io("disk".into()).exit_code(), 16);
         assert_eq!(Error::UnsupportedFormat(2).exit_code(), 1);

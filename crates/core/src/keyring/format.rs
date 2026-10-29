@@ -9,13 +9,13 @@ use serde::{Deserialize, Serialize};
 use crate::Error;
 
 pub const FORMAT_VERSION: u32 = 1;
-/// On-disk layout once a vault has been given a later master.
+/// On-disk layout once a keyring has been given a later master.
 pub const FORMAT_VERSION_CHAIN: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Config {
     pub format_version: u32,
-    pub vault_id: String,
+    pub keyring_id: String,
     pub auth_mode: String,
     pub master_recipient: String,
     /// 1 until a later config visit creates the next master. Missing on older files.
@@ -28,7 +28,7 @@ pub struct Config {
     pub settings: Settings,
     #[serde(default)]
     pub keys: Vec<KeyEntry>,
-    /// Set after the recovery code unlocks the vault, until a new code replaces it.
+    /// Set after the recovery code unlocks the keyring, until a new code replaces it.
     #[serde(default)]
     pub recovery_replacement_due: bool,
 }
@@ -94,7 +94,7 @@ pub struct KeyEntry {
     /// HID product string captured at enrollment, such as "YubiKey OTP+FIDO+CCID".
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub key_product: String,
-    /// When this user last unwrapped the vault. Empty until the first successful use.
+    /// When this user last unwrapped the keyring. Empty until the first successful use.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub last_used: String,
     #[serde(default)]
@@ -186,7 +186,7 @@ impl Config {
     pub fn new(master_recipient: &str) -> Self {
         Self {
             format_version: FORMAT_VERSION,
-            vault_id: random_vault_id(),
+            keyring_id: random_keyring_id(),
             auth_mode: "fido2-hmac".into(),
             master_recipient: master_recipient.into(),
             epoch: 1,
@@ -227,10 +227,10 @@ fn is_hex(text: &str) -> bool {
 pub fn validate_config(config: &Config) -> Result<(), Error> {
     age::x25519::Recipient::from_str(&config.master_recipient)
         .map_err(|_| invalid("the master recipient does not parse"))?;
-    let version = vault_version(config);
+    let version = keyring_version(config);
     if config.format_version == FORMAT_VERSION && (version != 1 || !config.generations.is_empty()) {
         return Err(invalid(
-            "format version 1 cannot list earlier vault versions",
+            "format version 1 cannot list earlier keyring versions",
         ));
     }
     let mut generation_epochs = HashSet::new();
@@ -312,12 +312,12 @@ pub fn validate_config(config: &Config) -> Result<(), Error> {
     Ok(())
 }
 
-/// User-facing vault version. Older files omit `epoch` and are version 1.
-pub fn vault_version(config: &Config) -> u32 {
+/// User-facing keyring version. Older files omit `epoch` and are version 1.
+pub fn keyring_version(config: &Config) -> u32 {
     if config.epoch == 0 { 1 } else { config.epoch }
 }
 
-fn random_vault_id() -> String {
+fn random_keyring_id() -> String {
     let mut bytes = [0u8; 16];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -351,7 +351,7 @@ mod tests {
             recipient: sample_recipient(),
         });
         let loaded = load_config(&config.to_toml().unwrap()).unwrap();
-        assert_eq!(super::vault_version(&loaded), 2);
+        assert_eq!(super::keyring_version(&loaded), 2);
     }
 
     #[test]
@@ -360,7 +360,7 @@ mod tests {
         let text = config.to_toml().unwrap();
         let loaded = load_config(&text).unwrap();
         assert_eq!(loaded.format_version, 1);
-        assert_eq!(super::vault_version(&loaded), 1);
+        assert_eq!(super::keyring_version(&loaded), 1);
         assert_eq!(loaded.auth_mode, "fido2-hmac");
         assert!(loaded.keys.is_empty());
         assert!(!text.contains("AGE-SECRET-KEY"));

@@ -13,10 +13,10 @@ use crate::Error;
 use crate::crypto::passphrase;
 use crate::crypto::recovery_code;
 use crate::master::Master;
-use crate::vault::format::{self, Config, KeyEntry};
-use crate::vault::keys;
-use crate::vault::names::{self, StoredName};
-use crate::vault::{create_private_dir, sync_dir, write_atomic};
+use crate::keyring::format::{self, Config, KeyEntry};
+use crate::keyring::keys;
+use crate::keyring::names::{self, StoredName};
+use crate::keyring::{create_private_dir, sync_dir, write_atomic};
 
 pub const FIDO2_MECHANISM: &str = "fido2-hmac";
 pub const RECOVERY_MECHANISM: &str = "recovery";
@@ -54,7 +54,7 @@ pub fn list_members(dir: &Path) -> Result<Vec<MemberInfo>, Error> {
 }
 
 /// Member list with labels and device names filled in from `names.age`.
-/// Labels are best-effort: a corrupt names file never blocks the vault.
+/// Labels are best-effort: a corrupt names file never blocks the keyring.
 pub fn list_members_unlocked(dir: &Path, master: &Master) -> Result<Vec<MemberInfo>, Error> {
     let _ = names::absorb_plaintext(dir, master);
     let book = names::load(dir, master).unwrap_or_default();
@@ -211,7 +211,7 @@ pub fn unlock_with_hmac(dir: &Path, hmac: &[u8; 32]) -> Result<Master, Error> {
         }
     }
     if !saw_hardware {
-        return Err(Error::Other("vault has no hardware user".into()));
+        return Err(Error::Other("keyring has no hardware user".into()));
     }
     Err(structural.unwrap_or(Error::WrongPassphrase))
 }
@@ -298,7 +298,7 @@ pub fn unlock_with_recovery_code(dir: &Path, typed: &str) -> Result<Master, Erro
                 if let Some(entry) = config.keys.iter_mut().find(|entry| entry.id == id) {
                     entry.last_used = format::utc_now();
                 }
-                // Best-effort: a read-only vault still unlocks.
+                // Best-effort: a read-only keyring still unlocks.
                 let _ = save_config(dir, &config);
                 return Ok(master);
             }
@@ -385,7 +385,7 @@ fn seal_recovery_wrapper(master: &Master, canonical: &str) -> Result<Vec<u8>, Er
 pub(crate) fn load_config_file(dir: &Path) -> Result<Config, Error> {
     let path = dir.join("config.toml");
     if !path.is_file() {
-        return Err(Error::VaultNotFound);
+        return Err(Error::KeyringNotFound);
     }
     let text = fs::read_to_string(path).map_err(Error::io)?;
     format::load_config(&text)
@@ -543,8 +543,8 @@ mod tests {
         stage_recovery_wrapper, unlock_with_hmac, unlock_with_recovery_code,
     };
     use crate::Error;
-    use crate::vault::format::load_config;
-    use crate::vault::init_hardware_vault;
+    use crate::keyring::format::load_config;
+    use crate::keyring::init_hardware_keyring;
     use rand::RngCore;
 
     struct TempDir(std::path::PathBuf);
@@ -584,7 +584,7 @@ mod tests {
         let dir = TempDir::new();
         let hmac = [0x55u8; 32];
         let params = fake_params();
-        let created = init_hardware_vault(dir.path(), "yubikey", &hmac, &params).unwrap();
+        let created = init_hardware_keyring(dir.path(), "yubikey", &hmac, &params).unwrap();
 
         let config_text = fs::read_to_string(dir.path().join("config.toml")).unwrap();
         let config = load_config(&config_text).unwrap();
@@ -659,7 +659,7 @@ mod tests {
     fn hardware_member_can_be_added_and_removed_deletes_mask() {
         let dir = TempDir::new();
         let hmac = [0x11u8; 32];
-        let created = init_hardware_vault(dir.path(), "one", &hmac, &fake_params()).unwrap();
+        let created = init_hardware_keyring(dir.path(), "one", &hmac, &fake_params()).unwrap();
         let master = unlock_with_hmac(dir.path(), &hmac).unwrap();
 
         let second = [0x66u8; 32];
@@ -692,7 +692,7 @@ mod tests {
     fn unlock_survives_a_corrupt_wrapper_and_corrupt_names() {
         let dir = TempDir::new();
         let first = [0x41u8; 32];
-        let created = init_hardware_vault(dir.path(), "one", &first, &fake_params()).unwrap();
+        let created = init_hardware_keyring(dir.path(), "one", &first, &fake_params()).unwrap();
         let master = unlock_with_hmac(dir.path(), &first).unwrap();
         let second = [0x42u8; 32];
         add_hardware_member_unlocked(dir.path(), &master, "two", &second, &fake_params()).unwrap();
@@ -715,11 +715,11 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn unlock_works_when_the_vault_directory_is_read_only() {
+    fn unlock_works_when_the_keyring_directory_is_read_only() {
         use std::os::unix::fs::PermissionsExt;
         let dir = TempDir::new();
         let hmac = [0x43u8; 32];
-        let created = init_hardware_vault(dir.path(), "one", &hmac, &fake_params()).unwrap();
+        let created = init_hardware_keyring(dir.path(), "one", &hmac, &fake_params()).unwrap();
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o500)).unwrap();
         let result = unlock_with_hmac(dir.path(), &hmac);
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -730,7 +730,7 @@ mod tests {
     fn an_old_plaintext_label_is_sealed_on_unlock() {
         let dir = TempDir::new();
         let hmac = [0x55u8; 32];
-        init_hardware_vault(dir.path(), "yubikey", &hmac, &fake_params()).unwrap();
+        init_hardware_keyring(dir.path(), "yubikey", &hmac, &fake_params()).unwrap();
         let mut config =
             load_config(&fs::read_to_string(dir.path().join("config.toml")).unwrap()).unwrap();
         config.keys[0].label = "desk".into();

@@ -16,9 +16,9 @@ pub mod keys;
 pub mod members;
 pub(crate) mod names;
 
-pub use bundle::{copy_vault, export_vault, import_vault};
-pub use epochs::{is_latest_master, masters_covering, rotate_vault};
-pub use format::{Config, FORMAT_VERSION, load_config, vault_version};
+pub use bundle::{copy_keyring, export_keyring, import_keyring};
+pub use epochs::{is_latest_master, masters_covering, rotate_keyring};
+pub use format::{Config, FORMAT_VERSION, load_config, keyring_version};
 pub use members::{
     DEFAULT_RP_ID, FIDO2_MECHANISM, HardwareMemberParams, MemberInfo, RECOVERY_MECHANISM,
     add_hardware_member_unlocked, commit_recovery_wrapper, has_hardware_member,
@@ -27,12 +27,12 @@ pub use members::{
 };
 
 #[derive(Debug)]
-pub struct CreatedVault {
+pub struct CreatedKeyring {
     pub dir: PathBuf,
     pub recipient: String,
     /// Live master for this command. Not written to disk.
     pub master: Master,
-    /// Shown once at vault creation.
+    /// Shown once at keyring creation.
     pub recovery_code: String,
 }
 
@@ -40,7 +40,7 @@ pub fn default_dir() -> Result<PathBuf, Error> {
     if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME")
         && !xdg.is_empty()
     {
-        return Ok(PathBuf::from(xdg).join("wardlet").join("vault"));
+        return Ok(PathBuf::from(xdg).join("wardlet").join("keyring"));
     }
     let home = std::env::var_os("HOME")
         .filter(|home| !home.is_empty())
@@ -48,24 +48,24 @@ pub fn default_dir() -> Result<PathBuf, Error> {
     Ok(PathBuf::from(home)
         .join(".config")
         .join("wardlet")
-        .join("vault"))
+        .join("keyring"))
 }
 
-pub fn init_hardware_vault(
+pub fn init_hardware_keyring(
     dir: &Path,
     label: &str,
     hmac: &[u8; 32],
     params: &HardwareMemberParams,
-) -> Result<CreatedVault, Error> {
+) -> Result<CreatedKeyring, Error> {
     if dir.exists() {
-        return Err(Error::VaultExists);
+        return Err(Error::KeyringExists);
     }
     let parent = dir.parent().filter(|path| !path.as_os_str().is_empty());
     let parent = parent.unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent).map_err(Error::io)?;
 
     let tmp = parent.join(temporary_name(dir));
-    let (recipient, master, recovery_code) = match write_hardware_vault(&tmp, label, hmac, params) {
+    let (recipient, master, recovery_code) = match write_hardware_keyring(&tmp, label, hmac, params) {
         Ok(result) => result,
         Err(err) => {
             let _ = fs::remove_dir_all(&tmp);
@@ -76,14 +76,14 @@ pub fn init_hardware_vault(
     fs::rename(&tmp, dir).map_err(|err| {
         let _ = fs::remove_dir_all(&tmp);
         if err.kind() == std::io::ErrorKind::AlreadyExists {
-            Error::VaultExists
+            Error::KeyringExists
         } else {
             Error::io(err)
         }
     })?;
     sync_dir(parent)?;
 
-    Ok(CreatedVault {
+    Ok(CreatedKeyring {
         dir: dir.to_path_buf(),
         recipient,
         master,
@@ -91,7 +91,7 @@ pub fn init_hardware_vault(
     })
 }
 
-fn write_hardware_vault(
+fn write_hardware_keyring(
     dir: &Path,
     label: &str,
     hmac: &[u8; 32],
@@ -113,7 +113,7 @@ fn temporary_name(dir: &Path) -> String {
     let leaf = dir
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("vault");
+        .unwrap_or("keyring");
     let mut bytes = [0u8; 8];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
     let suffix: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -172,9 +172,9 @@ mod tests {
 
     use rand::RngCore;
 
-    use super::init_hardware_vault;
+    use super::init_hardware_keyring;
     use crate::Error;
-    use crate::vault::members::HardwareMemberParams;
+    use crate::keyring::members::HardwareMemberParams;
 
     struct TempDir(std::path::PathBuf);
 
@@ -195,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn init_hardware_vault_does_not_persist_secrets() {
+    fn init_hardware_keyring_does_not_persist_secrets() {
         let dir = TempDir::new();
         let hmac = [0x7Eu8; 32];
         let params = HardwareMemberParams {
@@ -206,15 +206,15 @@ mod tests {
             key_product: "TREZOR".into(),
             label: "card".into(),
         };
-        let created = init_hardware_vault(&dir.0, "card", &hmac, &params).unwrap();
+        let created = init_hardware_keyring(&dir.0, "card", &hmac, &params).unwrap();
         let config_text = fs::read_to_string(dir.0.join("config.toml")).unwrap();
         assert!(!config_text.contains("AGE-SECRET-KEY"));
         assert!(!config_text.contains(created.master.expose_secret()));
         let hmac_hex: String = hmac.iter().map(|b| format!("{b:02x}")).collect();
         assert!(!config_text.contains(&hmac_hex));
         assert!(matches!(
-            init_hardware_vault(&dir.0, "card", &hmac, &params).unwrap_err(),
-            Error::VaultExists
+            init_hardware_keyring(&dir.0, "card", &hmac, &params).unwrap_err(),
+            Error::KeyringExists
         ));
     }
 }

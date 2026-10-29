@@ -1,4 +1,4 @@
-//! Wardlet desktop front-end. Links `wardlet-core` (same vault and files as the CLI).
+//! Wardlet desktop front-end. Links `wardlet-core` (same keyring and files as the CLI).
 
 mod fido;
 mod pin;
@@ -11,8 +11,8 @@ use std::thread;
 use eframe::egui;
 use pin::PinBridge;
 use status_bus::StatusBus;
-use wardlet_core::ops::{DecryptRequest, EncryptRequest, decrypt_vault, encrypt_paths};
-use wardlet_core::vault::{self, masters_covering};
+use wardlet_core::ops::{DecryptRequest, EncryptRequest, decrypt_keyring, encrypt_paths};
+use wardlet_core::keyring::{self, masters_covering};
 use wardlet_core::Error;
 use zeroize::Zeroize;
 
@@ -44,7 +44,7 @@ enum Event {
 }
 
 struct WardletApp {
-    vault_dir: PathBuf,
+    keyring_dir: PathBuf,
     status: StatusBus,
     pin: PinBridge,
     pin_draft: String,
@@ -59,17 +59,17 @@ struct WardletApp {
 impl WardletApp {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
         apply_dark_theme(&cc.egui_ctx);
-        let vault_dir = vault::default_dir().unwrap_or_else(|_| PathBuf::from("vault"));
+        let keyring_dir = keyring::default_dir().unwrap_or_else(|_| PathBuf::from("keyring"));
         let status = StatusBus::default();
         let pin = PinBridge::new();
         let (job_tx, job_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         let worker_status = status.clone();
         let worker_pin = pin.clone();
-        let worker_dir = vault_dir.clone();
+        let worker_dir = keyring_dir.clone();
         thread::spawn(move || worker_loop(worker_dir, worker_pin, worker_status, job_rx, event_tx));
         let mut app = Self {
-            vault_dir,
+            keyring_dir,
             status,
             pin,
             pin_draft: String::new(),
@@ -85,13 +85,13 @@ impl WardletApp {
     }
 
     fn refresh_summary(&mut self) {
-        self.summary = match read_vault_summary(&self.vault_dir) {
+        self.summary = match read_keyring_summary(&self.keyring_dir) {
             Ok(text) => text,
-            Err(Error::VaultNotFound) => format!(
-                "No vault yet.\nPath: {}\nSet up with your keys to begin.",
-                self.vault_dir.display()
+            Err(Error::KeyringNotFound) => format!(
+                "No keyring yet.\nPath: {}\nSet up with your keys to begin.",
+                self.keyring_dir.display()
             ),
-            Err(err) => format!("Vault error: {err}"),
+            Err(err) => format!("Keyring error: {err}"),
         };
     }
 
@@ -121,7 +121,7 @@ impl eframe::App for WardletApp {
                 Event::RecoveryCode(code) => {
                     self.recovery_once = Some(code);
                     self.status
-                        .set("Vault created. Store the recovery code, then dismiss.");
+                        .set("Keyring created. Store the recovery code, then dismiss.");
                     self.refresh_summary();
                 }
             }
@@ -148,7 +148,7 @@ impl eframe::App for WardletApp {
 
             ui.horizontal(|ui| {
                 if ui
-                    .add_enabled(!self.busy, egui::Button::new("Set up vault"))
+                    .add_enabled(!self.busy, egui::Button::new("Set up keyring"))
                     .clicked()
                 {
                     let label = self.key_label.trim().to_owned();
@@ -221,7 +221,7 @@ impl eframe::App for WardletApp {
                         ui.add_space(8.0);
                         if ui.button("I saved it").clicked() {
                             self.recovery_once = None;
-                            self.status.set("Vault ready.");
+                            self.status.set("Keyring ready.");
                         }
                     });
             }
@@ -230,7 +230,7 @@ impl eframe::App for WardletApp {
 }
 
 fn worker_loop(
-    vault_dir: PathBuf,
+    keyring_dir: PathBuf,
     pin: PinBridge,
     status: StatusBus,
     jobs: Receiver<Job>,
@@ -238,9 +238,9 @@ fn worker_loop(
 ) {
     while let Ok(job) = jobs.recv() {
         let result = match job {
-            Job::Init { label } => run_init(&vault_dir, &label, &pin, &status),
-            Job::Encrypt { path } => run_encrypt(&vault_dir, path, &pin, &status),
-            Job::Decrypt { path } => run_decrypt(&vault_dir, path, &pin, &status),
+            Job::Init { label } => run_init(&keyring_dir, &label, &pin, &status),
+            Job::Encrypt { path } => run_encrypt(&keyring_dir, path, &pin, &status),
+            Job::Decrypt { path } => run_decrypt(&keyring_dir, path, &pin, &status),
         };
         let _ = events.send(match result {
             Ok(WorkerOk::Message(message)) => Event::Done(message),
@@ -262,10 +262,10 @@ fn run_init(
     status: &StatusBus,
 ) -> Result<WorkerOk, Error> {
     if dir.exists() {
-        return Err(Error::VaultExists);
+        return Err(Error::KeyringExists);
     }
     let mut enrolled = fido::enroll_hardware_member(label, pin, status)?;
-    let created = vault::init_hardware_vault(dir, label, &enrolled.hmac, &enrolled.params);
+    let created = keyring::init_hardware_keyring(dir, label, &enrolled.hmac, &enrolled.params);
     enrolled.hmac.zeroize();
     let mut created = created?;
     let code = std::mem::take(&mut created.recovery_code);
@@ -278,20 +278,20 @@ fn run_encrypt(
     pin: &PinBridge,
     status: &StatusBus,
 ) -> Result<WorkerOk, Error> {
-    let master = fido::unlock_vault_with_hardware(dir, pin, status)?;
-    if !vault::is_latest_master(dir, &master)? {
+    let master = fido::unlock_keyring_with_hardware(dir, pin, status)?;
+    if !keyring::is_latest_master(dir, &master)? {
         return Err(Error::Other(
-            "this key opens an older vault copy. Import the latest vault.".into(),
+            "this key opens an older keyring copy. Import the latest keyring.".into(),
         ));
     }
     let text = std::fs::read_to_string(dir.join("config.toml")).map_err(Error::io)?;
-    let config = vault::load_config(&text)?;
-    let version = vault::vault_version(&config);
+    let config = keyring::load_config(&text)?;
+    let version = keyring::keyring_version(&config);
     let stamp = Some(wardlet_core::ops::FileStamp {
-        vault_id: dir
+        keyring_id: dir
             .file_name()
             .and_then(|name| name.to_str())
-            .unwrap_or("vault")
+            .unwrap_or("keyring")
             .to_owned(),
         version,
     });
@@ -322,11 +322,11 @@ fn run_decrypt(
     pin: &PinBridge,
     status: &StatusBus,
 ) -> Result<WorkerOk, Error> {
-    let master = fido::unlock_vault_with_hardware(dir, pin, status)?;
+    let master = fido::unlock_keyring_with_hardware(dir, pin, status)?;
     let chain = masters_covering(dir, master)?;
     let text = std::fs::read_to_string(dir.join("config.toml")).map_err(Error::io)?;
-    let config = vault::load_config(&text)?;
-    let version = vault::vault_version(&config);
+    let config = keyring::load_config(&text)?;
+    let version = keyring::keyring_version(&config);
     let request = DecryptRequest {
         paths: std::slice::from_ref(&path),
         recursive: false,
@@ -335,27 +335,27 @@ fn run_decrypt(
         suffix: ".age",
     };
     wardlet_core::ops::preflight_decrypt(&request)?;
-    decrypt_vault(&chain, "vault", version, &request)?;
+    decrypt_keyring(&chain, &config.keyring_id, version, &request)?;
     Ok(WorkerOk::Message(format!(
         "Opened beside the locked file: {}",
         path.display()
     )))
 }
 
-fn read_vault_summary(dir: &Path) -> Result<String, Error> {
+fn read_keyring_summary(dir: &Path) -> Result<String, Error> {
     let text = match std::fs::read_to_string(dir.join("config.toml")) {
         Ok(text) => text,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Err(Error::VaultNotFound);
+            return Err(Error::KeyringNotFound);
         }
         Err(err) => return Err(Error::io(err)),
     };
-    let config = vault::load_config(&text)?;
-    let keys = vault::list_members(dir)?.len();
-    let version = vault::vault_version(&config);
+    let config = keyring::load_config(&text)?;
+    let keys = keyring::list_members(dir)?.len();
+    let version = keyring::keyring_version(&config);
     let noun = if keys == 1 { "key" } else { "keys" };
     Ok(format!(
-        "Vault: {}\nVersion: {version}\nKeys: {keys} {noun}",
+        "Keyring: {}\nVersion: {version}\nKeys: {keys} {noun}",
         dir.display()
     ))
 }

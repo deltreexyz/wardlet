@@ -10,7 +10,7 @@ use ctap_fido2::pin::{self, PinSession};
 use rand::RngCore;
 use wardlet_core::Error;
 use wardlet_core::master::Master;
-use wardlet_core::vault::{self, DEFAULT_RP_ID, HardwareMemberParams};
+use wardlet_core::keyring::{self, DEFAULT_RP_ID, HardwareMemberParams};
 use zeroize::Zeroize;
 
 use crate::debug;
@@ -157,7 +157,7 @@ fn derive_hmac_from_connected_key(targets: &[HardwareMemberParams]) -> Result<[u
     }
     if saw_enrolled_product {
         Err(Error::Other(
-            "This key is not enrolled in this vault.".into(),
+            "This key is not enrolled in this keyring.".into(),
         ))
     } else {
         Err(Error::Other("Plug in one of your FIDO2 keys.".into()))
@@ -186,14 +186,14 @@ fn is_no_credentials(err: &ctap_fido2::error::Error) -> bool {
 }
 
 /// Unlock with whichever enrolled key is plugged in. The key list stays hidden.
-pub fn unlock_vault_with_hardware(dir: &std::path::Path) -> Result<Master, Error> {
-    let targets = vault::list_hardware_params(dir)?;
+pub fn unlock_keyring_with_hardware(dir: &std::path::Path) -> Result<Master, Error> {
+    let targets = keyring::list_hardware_params(dir)?;
     if targets.is_empty() {
-        return Err(Error::Other("vault has no hardware user".into()));
+        return Err(Error::Other("keyring has no hardware user".into()));
     }
     eprintln!("Unlock with one of your FIDO2 keys.");
     let mut hmac = derive_hmac_from_connected_key(&targets)?;
-    let result = vault::unlock_with_hmac(dir, &hmac);
+    let result = keyring::unlock_with_hmac(dir, &hmac);
     hmac.zeroize();
     result
 }
@@ -281,7 +281,7 @@ fn prompt_pin_if_needed(
     let info = auth.info().map_err(map_ctap)?;
     if !info.client_pin_set() {
         if enrollment {
-            eprintln!("This key has no FIDO2 PIN. A stolen key can unlock this vault.");
+            eprintln!("This key has no FIDO2 PIN. A stolen key can unlock this keyring.");
         }
         return Ok(None);
     }

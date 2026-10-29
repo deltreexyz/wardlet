@@ -1,6 +1,6 @@
 //! Encrypt and decrypt the paths a person names.
 //!
-//! The vault does not keep a list of files. Ciphertext is an age file beside
+//! The keyring does not keep a list of files. Ciphertext is an age file beside
 //! the source, or under `--output`. The master stays in memory for this call.
 
 use std::collections::HashSet;
@@ -22,7 +22,7 @@ const DEFAULT_SUFFIX: &str = ".age";
 const LARGE_FILE_BYTES: u64 = 100 * 1024 * 1024;
 
 pub struct FileStamp {
-    pub vault_id: String,
+    pub keyring_id: String,
     pub version: u32,
 }
 
@@ -166,17 +166,17 @@ pub fn decrypt_paths(
     master: &Master,
     request: &DecryptRequest<'_>,
 ) -> Result<Vec<FileAction>, Error> {
-    decrypt_vault(std::slice::from_ref(master), "", 0, request)
+    decrypt_keyring(std::slice::from_ref(master), "", 0, request)
 }
 
-pub fn decrypt_vault(
+pub fn decrypt_keyring(
     masters: &[Master],
-    vault_id: &str,
+    keyring_id: &str,
     version: u32,
     request: &DecryptRequest<'_>,
 ) -> Result<Vec<FileAction>, Error> {
     if masters.is_empty() {
-        return Err(Error::Other("vault has no master".into()));
+        return Err(Error::Other("keyring has no master".into()));
     }
     let suffix = normalize_suffix(request.suffix);
     let jobs = collect(request.paths, request.recursive, &suffix, false)?;
@@ -190,7 +190,7 @@ pub fn decrypt_vault(
         if destination.exists() && !request.force {
             return Err(Error::Collision);
         }
-        decrypt_one(masters, vault_id, version, &job.source, &destination)?;
+        decrypt_one(masters, keyring_id, version, &job.source, &destination)?;
         actions.push(FileAction::Wrote {
             source: job.source,
             destination,
@@ -430,7 +430,7 @@ fn encrypt_reader(
 
 fn decrypt_one(
     masters: &[Master],
-    vault_id: &str,
+    keyring_id: &str,
     version: u32,
     source: &Path,
     destination: &Path,
@@ -447,7 +447,7 @@ fn decrypt_one(
     let write_result = (|| -> Result<(), Error> {
         for master in masters {
             let identity = Identity::from_str(master.expose_secret())
-                .map_err(|_| Error::Other("vault master is not an age identity".into()))?;
+                .map_err(|_| Error::Other("keyring master is not an age identity".into()))?;
             let input = File::open(source).map_err(Error::io)?;
             let decryptor = Decryptor::new(input)
                 .map_err(|_| Error::Other(format!("{} is not an age file", source.display())))?;
@@ -472,7 +472,7 @@ fn decrypt_one(
         }
         let header = read_header_prefix(source).unwrap_or_default();
         Err(Error::Other(stale_or_foreign(
-            &header, vault_id, version, source,
+            &header, keyring_id, version, source,
         )))
     })();
     if let Err(err) = write_result {
@@ -484,21 +484,21 @@ fn decrypt_one(
     replace_file(&partial, destination)
 }
 
-fn stale_or_foreign(ciphertext: &[u8], vault_id: &str, version: u32, path: &Path) -> String {
+fn stale_or_foreign(ciphertext: &[u8], keyring_id: &str, version: u32, path: &Path) -> String {
     if let Some(stamp) = read_stamp(ciphertext)
-        && !vault_id.is_empty()
-        && stamp.vault_id == vault_id
+        && !keyring_id.is_empty()
+        && stamp.keyring_id == keyring_id
         && stamp.version > version
     {
         return format!(
-            "This file was encrypted with version {} of this vault. This copy is version {version}. Import the newer vault, then decrypt again.",
+            "This file was encrypted with version {} of this keyring. This copy is version {version}. Import the newer keyring, then decrypt again.",
             stamp.version
         );
     }
-    format!("this vault cannot decrypt {}", path.display())
+    format!("this keyring cannot decrypt {}", path.display())
 }
 
-/// Vault id and version from a Wardlet age header, when present.
+/// Keyring id and version from a Wardlet age header, when present.
 pub fn file_stamp(path: &Path) -> Result<Option<FileStamp>, Error> {
     let header = read_header_prefix(path)?;
     Ok(read_stamp(&header))
@@ -524,22 +524,22 @@ fn read_stamp(ciphertext: &[u8]) -> Option<FileStamp> {
             continue;
         };
         let mut parts = rest.split_whitespace();
-        let vault_id = parts.next()?.to_owned();
+        let keyring_id = parts.next()?.to_owned();
         let version = parts.next()?.parse().ok()?;
-        return Some(FileStamp { vault_id, version });
+        return Some(FileStamp { keyring_id, version });
     }
     None
 }
 
 struct StampRecipient {
-    vault_id: String,
+    keyring_id: String,
     version: u32,
 }
 
 impl StampRecipient {
     fn from_stamp(stamp: &FileStamp) -> Self {
         Self {
-            vault_id: stamp.vault_id.clone(),
+            keyring_id: stamp.keyring_id.clone(),
             version: stamp.version,
         }
     }
@@ -553,7 +553,7 @@ impl age::Recipient for StampRecipient {
         Ok((
             vec![Stanza {
                 tag: "wardlet-v1".into(),
-                args: vec![self.vault_id.clone(), self.version.to_string()],
+                args: vec![self.keyring_id.clone(), self.version.to_string()],
                 body: Vec::new(),
             }],
             HashSet::new(),
@@ -563,12 +563,12 @@ impl age::Recipient for StampRecipient {
 
 fn decrypted_hash(master: &Master, input: impl Read) -> Result<Vec<u8>, Error> {
     let identity = Identity::from_str(master.expose_secret())
-        .map_err(|_| Error::Other("vault master is not an age identity".into()))?;
+        .map_err(|_| Error::Other("keyring master is not an age identity".into()))?;
     let decryptor =
         Decryptor::new(input).map_err(|_| Error::Other("ciphertext is not an age file".into()))?;
     let mut reader = decryptor
         .decrypt(std::iter::once(&identity as &dyn age::Identity))
-        .map_err(|_| Error::Other("ciphertext does not open with this vault".into()))?;
+        .map_err(|_| Error::Other("ciphertext does not open with this keyring".into()))?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     loop {
@@ -680,7 +680,7 @@ mod tests {
         preflight_decrypt, preflight_encrypt,
     };
     use crate::master::Master;
-    use crate::vault::keys::{identity_from_hmac, seal_mask};
+    use crate::keyring::keys::{identity_from_hmac, seal_mask};
 
     struct TempDir(PathBuf);
 
@@ -882,7 +882,7 @@ mod tests {
         let hmac = [0x44u8; 32];
         let card = identity_from_hmac(&hmac).unwrap();
         let wrapped = seal_mask(&master, &card.recipient()).unwrap();
-        let opened = crate::vault::keys::open_mask(&wrapped, &card).unwrap();
+        let opened = crate::keyring::keys::open_mask(&wrapped, &card).unwrap();
         assert_eq!(opened.recipient(), master.recipient());
 
         let out = dir.0.join("opened");

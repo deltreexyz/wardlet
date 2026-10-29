@@ -1,4 +1,4 @@
-//! Crypto and vault format for Wardlet.
+//! Crypto and keyring format for Wardlet.
 //!
 //! The `wardlet` binary is a thin command-line wrapper over this library.
 //! User files stay where they are. This crate handles the master identity
@@ -8,6 +8,6 @@ pub mod crypto;
 pub mod error;
 pub mod master;
 pub mod ops;
-pub mod vault;
+pub mod keyring;
 
 pub use error::Error;

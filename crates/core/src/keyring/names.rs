@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::Error;
 use crate::master::Master;
-use crate::vault::format::{self, Config};
-use crate::vault::{sync_dir, write_atomic};
+use crate::keyring::format::{self, Config};
+use crate::keyring::{sync_dir, write_atomic};
 
 const FILE_NAME: &str = "names.age";
 
@@ -95,7 +95,7 @@ pub fn absorb_plaintext(dir: &Path, master: &Master) -> Result<(), Error> {
 fn load_config(dir: &Path) -> Result<Config, Error> {
     let path = dir.join("config.toml");
     if !path.is_file() {
-        return Err(Error::VaultNotFound);
+        return Err(Error::KeyringNotFound);
     }
     let text = fs::read_to_string(path).map_err(Error::io)?;
     format::load_config(&text)

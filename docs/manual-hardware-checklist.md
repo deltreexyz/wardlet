@@ -4,7 +4,7 @@ The FIDO2 layer has no mock authenticator, so these steps are a release gate.
 Run them on real hardware before tagging a release: a YubiKey 5 and a
 Trezor Safe 3. Use a throwaway `--dir` for each run.
 
-## Two keys, one vault
+## Two keys, one keyring
 
 1. `wardlet --dir /tmp/check-a init` with the first key. Save the recovery code.
 2. Confirm the saved code when asked (default is No; you must answer `y`).
@@ -12,7 +12,7 @@ Trezor Safe 3. Use a throwaway `--dir` for each run.
 4. `wardlet --dir /tmp/check-a enc <file>`: each key in turn (unplug the other)
    can run `wardlet --dir /tmp/check-a dec <file>.age`.
 5. Remove one key's wrapper file (`keys/<id>.mask`) copy aside, corrupt the
-   other copy in a scratch vault, and confirm unlock still works with the
+   other copy in a scratch keyring, and confirm unlock still works with the
    remaining good key.
 
 ## Change keys (rotation)
@@ -23,11 +23,11 @@ Trezor Safe 3. Use a throwaway `--dir` for each run.
 4. Files encrypted after the change decrypt with every remaining key.
 5. The previous recovery code opens only files from before the change.
 6. The new recovery code opens everything.
-7. Declining the new recovery code in a second visit leaves the vault
+7. Declining the new recovery code in a second visit leaves the keyring
    unchanged: the code from step 2 still works and no version bump appears in
    `wardlet --dir /tmp/check-a status`.
 
-## Export and import on a second vault directory
+## Export and import on a second keyring directory
 
 1. `wardlet --dir /tmp/check-a export /tmp/check.wardlet`
 2. `wardlet --dir /tmp/check-b import /tmp/check.wardlet`
@@ -39,7 +39,7 @@ Trezor Safe 3. Use a throwaway `--dir` for each run.
 ## Wrong key and wrong code
 
 1. A hardware key that was never enrolled does not unlock (`dec` fails and
-   prints that the key or code does not open the vault).
+   prints that the key or code does not open the keyring).
 2. A mistyped recovery code in `wardlet recover` fails the same way.
 3. The last remaining key cannot be removed in `wardlet config`.
 

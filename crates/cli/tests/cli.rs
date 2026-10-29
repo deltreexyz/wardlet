@@ -37,12 +37,12 @@ fn rand_bytes(bytes: &mut [u8]) {
     }
 }
 
-/// Seed a real vault with a fake hmac, as the core tests do. The binary
+/// Seed a real keyring with a fake hmac, as the core tests do. The binary
 /// cannot unlock it without hardware, but every command that does not need
 /// an unlock can run against it end to end.
-fn seed_vault(dir: &std::path::Path) {
+fn seed_keyring(dir: &std::path::Path) {
     let hmac = [0x55u8; 32];
-    let params = wardlet_core::vault::HardwareMemberParams {
+    let params = wardlet_core::keyring::HardwareMemberParams {
         credential_id: vec![1, 2, 3, 4],
         rp_id: "wardlet.com".into(),
         salt: [0x22u8; 32],
@@ -50,7 +50,7 @@ fn seed_vault(dir: &std::path::Path) {
         key_product: "YubiKey".into(),
         label: "desk".into(),
     };
-    wardlet_core::vault::init_hardware_vault(dir, "desk", &hmac, &params).unwrap();
+    wardlet_core::keyring::init_hardware_keyring(dir, "desk", &hmac, &params).unwrap();
 }
 
 #[test]
@@ -118,8 +118,8 @@ fn help_lists_phase0_commands() {
 }
 
 #[test]
-fn keys_without_a_vault_exits_10() {
-    let dir = std::env::temp_dir().join("wardlet-missing-vault-for-keys-test");
+fn keys_without_a_keyring_exits_10() {
+    let dir = std::env::temp_dir().join("wardlet-missing-keyring-for-keys-test");
     let _ = std::fs::remove_dir_all(&dir);
     let output = wardlet(&["--dir", dir.to_str().expect("temp path is utf-8"), "keys"]);
     assert_eq!(output.status.code(), Some(10));
@@ -132,21 +132,21 @@ fn enc_without_a_path_is_a_usage_error() {
 }
 
 #[test]
-fn status_without_a_vault_exits_10() {
-    let dir = std::env::temp_dir().join("wardlet-missing-vault-for-status-test");
+fn status_without_a_keyring_exits_10() {
+    let dir = std::env::temp_dir().join("wardlet-missing-keyring-for-status-test");
     let _ = std::fs::remove_dir_all(&dir);
     let output = wardlet(&["--dir", dir.to_str().expect("temp path is utf-8"), "status"]);
     assert_eq!(output.status.code(), Some(10));
 }
 
 #[test]
-fn status_and_keys_succeed_on_a_seeded_vault() {
+fn status_and_keys_succeed_on_a_seeded_keyring() {
     let dir = TempDir::new("seeded");
-    let vault = dir.0.join("vault");
-    seed_vault(&vault);
-    let vault_arg = vault.to_str().unwrap().to_owned();
+    let keyring = dir.0.join("keyring");
+    seed_keyring(&keyring);
+    let keyring_arg = keyring.to_str().unwrap().to_owned();
 
-    let output = wardlet(&["--dir", &vault_arg, "status"]);
+    let output = wardlet(&["--dir", &keyring_arg, "status"]);
     assert!(
         output.status.success(),
         "{}",
@@ -156,7 +156,7 @@ fn status_and_keys_succeed_on_a_seeded_vault() {
     assert!(stdout.contains("Version: 1"), "{stdout}");
     assert!(stdout.contains("Health: ok"), "{stdout}");
 
-    let output = wardlet(&["--dir", &vault_arg, "keys"]);
+    let output = wardlet(&["--dir", &keyring_arg, "keys"]);
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("1 key."), "{stdout}");
@@ -167,12 +167,12 @@ fn status_and_keys_succeed_on_a_seeded_vault() {
 #[test]
 fn export_import_round_trip_through_the_binary() {
     let dir = TempDir::new("roundtrip");
-    let vault = dir.0.join("vault");
-    seed_vault(&vault);
-    let export = dir.0.join("vault.wardlet");
+    let keyring = dir.0.join("keyring");
+    seed_keyring(&keyring);
+    let export = dir.0.join("keyring.wardlet");
     let output = wardlet(&[
         "--dir",
-        vault.to_str().unwrap(),
+        keyring.to_str().unwrap(),
         "export",
         export.to_str().unwrap(),
     ]);
@@ -204,13 +204,13 @@ fn export_import_round_trip_through_the_binary() {
 #[test]
 fn edit_refuses_a_foreign_age_file_before_any_unlock() {
     let dir = TempDir::new("edit-foreign");
-    let vault = dir.0.join("vault");
-    seed_vault(&vault);
+    let keyring = dir.0.join("keyring");
+    seed_keyring(&keyring);
     let foreign = dir.0.join("foreign.txt.age");
     std::fs::write(&foreign, b"age-encryption.org/v1\n-> X25519 abc\n").unwrap();
     let output = wardlet(&[
         "--dir",
-        vault.to_str().unwrap(),
+        keyring.to_str().unwrap(),
         "edit",
         foreign.to_str().unwrap(),
     ]);
@@ -218,7 +218,7 @@ fn edit_refuses_a_foreign_age_file_before_any_unlock() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
-        format!("{stdout}{stderr}").contains("was not encrypted with a Wardlet vault"),
+        format!("{stdout}{stderr}").contains("was not encrypted with a Wardlet keyring"),
         "{stdout}{stderr}"
     );
 }
@@ -226,13 +226,13 @@ fn edit_refuses_a_foreign_age_file_before_any_unlock() {
 #[test]
 fn new_refuses_an_existing_file_before_any_unlock() {
     let dir = TempDir::new("new-existing");
-    let vault = dir.0.join("vault");
-    seed_vault(&vault);
+    let keyring = dir.0.join("keyring");
+    seed_keyring(&keyring);
     let existing = dir.0.join("notes.txt");
     std::fs::write(&existing, b"already here").unwrap();
     let output = wardlet(&[
         "--dir",
-        vault.to_str().unwrap(),
+        keyring.to_str().unwrap(),
         "new",
         existing.to_str().unwrap(),
     ]);
@@ -247,15 +247,15 @@ fn new_refuses_an_existing_file_before_any_unlock() {
 }
 
 #[test]
-fn enc_without_a_vault_exits_10() {
-    let dir = std::env::temp_dir().join("wardlet-missing-vault-for-enc-test");
+fn enc_without_a_keyring_exits_10() {
+    let dir = std::env::temp_dir().join("wardlet-missing-keyring-for-enc-test");
     let _ = std::fs::remove_dir_all(&dir);
     let file = dir.join("note.txt");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(&file, b"secret").unwrap();
     let output = wardlet(&[
         "--dir",
-        dir.join("vault").to_str().expect("temp path is utf-8"),
+        dir.join("keyring").to_str().expect("temp path is utf-8"),
         "enc",
         file.to_str().expect("temp path is utf-8"),
     ]);

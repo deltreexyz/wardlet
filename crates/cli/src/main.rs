@@ -11,7 +11,7 @@ use clap::{Parser, Subcommand};
 use wardlet_core::Error;
 use wardlet_core::master::Master;
 use wardlet_core::ops::{self, FileAction};
-use wardlet_core::vault::{self, MemberInfo, default_dir};
+use wardlet_core::keyring::{self, MemberInfo, default_dir};
 use zeroize::Zeroize;
 
 #[derive(Parser)]
@@ -21,18 +21,18 @@ use zeroize::Zeroize;
     about = "Your key is the lock. Encrypt files with the security key you already own.",
     after_help = "\
 Examples:
-  wardlet init               First run. Create the vault and enroll a FIDO2 key
+  wardlet init               First run. Create the keyring and enroll a FIDO2 key
   wardlet config             Add or remove a key
   wardlet enc README.md      Encrypt a file, then ask before deleting it
   wardlet enc -r ~/secrets   Encrypt every file in a directory
   wardlet dec README.md.age  Decrypt a file
-  wardlet edit notes.txt.age Edit a vault file in your editor, then encrypt it again
-  wardlet new notes.txt      Create a vault file in your editor
-  wardlet export vault.wardlet
-  wardlet import vault.wardlet"
+  wardlet edit notes.txt.age Edit a locked file in your editor, then encrypt it again
+  wardlet new notes.txt      Create a locked file in your editor
+  wardlet export keyring.wardlet
+  wardlet import keyring.wardlet"
 )]
 struct Cli {
-    /// Key directory. Defaults to $XDG_CONFIG_HOME/wardlet/vault.
+    /// Keyring directory. Defaults to $XDG_CONFIG_HOME/wardlet/keyring.
     #[arg(long, global = true)]
     dir: Option<PathBuf>,
 
@@ -46,7 +46,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Create the vault and enroll a FIDO2 key.
+    /// Create the keyring and enroll a FIDO2 key.
     Init,
     /// Add or remove a key.
     Config,
@@ -84,9 +84,9 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
-    /// Decrypt a vault file, open it in your editor until you quit, then encrypt it again.
+    /// Decrypt a locked file, open it in your editor until you quit, then encrypt it again.
     Edit { file: PathBuf },
-    /// Create a new vault file in your editor, then encrypt it.
+    /// Create a new locked file in your editor, then encrypt it.
     New { file: PathBuf },
     /// Show key-directory health without unlocking it.
     Status {
@@ -100,9 +100,9 @@ enum Command {
     },
     /// Unlock with the recovery code. The code keeps working until it is replaced.
     Recover,
-    /// Write the vault to one file. Encrypted files and the recovery code stay where they are.
+    /// Write the keyring to one file. Encrypted files and the recovery code stay where they are.
     Export { file: PathBuf },
-    /// Create a vault from an export. Refuses when a vault is already there.
+    /// Create a keyring from an export. Refuses when a keyring is already there.
     Import { file: PathBuf },
     /// Print the version.
     Version,
@@ -169,17 +169,17 @@ fn run(cli: Cli) -> Result<(), Error> {
 }
 
 fn init(dir: Option<PathBuf>, show_banner: bool) -> Result<(), Error> {
-    let dir = vault_dir(dir)?;
+    let dir = keyring_dir(dir)?;
     if dir.exists() {
-        return Err(Error::VaultExists);
+        return Err(Error::KeyringExists);
     }
-    debug::log(&format!("vault directory {}", dir.display()));
+    debug::log(&format!("keyring directory {}", dir.display()));
     if show_banner {
         print_banner();
     }
-    println!("Add the keys you want in this vault. Wardlet will create it when you are done.");
+    println!("Add the keys you want in this keyring. Wardlet will create it when you are done.");
     println!(
-        "You can add or remove keys later. After that, update the vault on every computer that uses it. An older copy cannot open files encrypted after the change."
+        "You can add or remove keys later. After that, update the keyring on every computer that uses it. An older copy cannot open files encrypted after the change."
     );
     println!();
     print_fido2_requirement();
@@ -187,8 +187,8 @@ fn init(dir: Option<PathBuf>, show_banner: bool) -> Result<(), Error> {
 
     debug::log("enrolling the first FIDO2 key");
     let mut enrolled = fido::enroll_hardware_member(&label)?;
-    debug::log("writing the vault and the recovery wrapper");
-    let created = vault::init_hardware_vault(&dir, &label, &enrolled.hmac, &enrolled.params);
+    debug::log("writing the keyring and the recovery wrapper");
+    let created = keyring::init_hardware_keyring(&dir, &label, &enrolled.hmac, &enrolled.params);
     let mut created = created?;
     print_recovery_code(&created.recovery_code);
     let saved = confirm_recovery_saved()?;
@@ -197,14 +197,14 @@ fn init(dir: Option<PathBuf>, show_banner: bool) -> Result<(), Error> {
         let removed = std::fs::remove_dir_all(&created.dir);
         clear_screen();
         println!("The recovery code was not saved, and it will not be shown again.");
-        println!("This vault was removed. Run wardlet init to start over.");
+        println!("This keyring was removed. Run wardlet init to start over.");
         enrolled.hmac.zeroize();
         return removed.map_err(Error::io);
     }
     clear_screen();
-    println!("Vault created at {}", created.dir.display());
+    println!("Keyring created at {}", created.dir.display());
     println!("Recipient: {}", created.recipient);
-    print_authorized_keys(&vault::list_members_unlocked(
+    print_authorized_keys(&keyring::list_members_unlocked(
         &created.dir,
         &created.master,
     )?);
@@ -216,14 +216,14 @@ fn init(dir: Option<PathBuf>, show_banner: bool) -> Result<(), Error> {
 fn offer_more_hardware_keys(dir: &std::path::Path, master: &Master) -> Result<(), Error> {
     loop {
         println!();
-        if !prompt_yes("Add another FIDO2 key to the vault?") {
+        if !prompt_yes("Add another FIDO2 key to the keyring?") {
             debug::log("finished adding keys");
             break;
         }
         debug::log("enrolling another FIDO2 key");
         let label = prompt_key_name("Label for the new key")?;
         let mut enrolled = fido::enroll_hardware_member(&label)?;
-        let added = vault::add_hardware_member_unlocked(
+        let added = keyring::add_hardware_member_unlocked(
             dir,
             master,
             &label,
@@ -236,17 +236,17 @@ fn offer_more_hardware_keys(dir: &std::path::Path, master: &Master) -> Result<()
             "Added {} on {} ({})",
             added.label, enrolled.params.key_product, added.id
         );
-        print_authorized_keys(&vault::list_members_unlocked(dir, master)?);
+        print_authorized_keys(&keyring::list_members_unlocked(dir, master)?);
     }
-    if vault::list_members(dir)?.len() < 2 {
+    if keyring::list_members(dir)?.len() < 2 {
         println!();
         println!(
-            "Recommendation: Enroll at least 2 FIDO2 keys. A second key unlocks the vault if the first is lost."
+            "Recommendation: Enroll at least 2 FIDO2 keys. A second key unlocks the keyring if the first is lost."
         );
         println!("The recovery code is the backup if every FIDO2 key is lost.");
     }
     println!();
-    println!("Your vault is ready.");
+    println!("Your keyring is ready.");
     println!("Next: wardlet enc <file>");
     Ok(())
 }
@@ -258,12 +258,12 @@ struct Visit {
 }
 
 fn configure(dir: Option<PathBuf>) -> Result<(), Error> {
-    let dir = vault_dir(dir)?;
+    let dir = keyring_dir(dir)?;
     recover_interrupted_commit(&dir);
     if !dir.join("config.toml").is_file() {
         print_banner();
-        println!("No vault at {}", dir.display());
-        if !prompt_yes("Create a Wardlet vault?") {
+        println!("No keyring at {}", dir.display());
+        if !prompt_yes("Create a Wardlet keyring?") {
             return Ok(());
         }
         return init(Some(dir), false);
@@ -282,17 +282,17 @@ fn configure(dir: Option<PathBuf>) -> Result<(), Error> {
 
 fn configure_visit(dir: &std::path::Path, visit: &mut Option<Visit>) -> Result<(), Error> {
     loop {
-        let count = vault::list_members(visit_dir(dir, visit))?.len();
+        let count = keyring::list_members(visit_dir(dir, visit))?.len();
         let noun = if count == 1 { "key" } else { "keys" };
-        println!("Vault: {}", dir.display());
+        println!("Keyring: {}", dir.display());
         println!("{count} {noun}.");
         println!(
-            "Add or remove the keys you want in this visit. Wardlet saves the vault once when you quit."
+            "Add or remove the keys you want in this visit. Wardlet saves the keyring once when you quit."
         );
         println!(
-            "Then export the vault and import it on every other computer. An older copy cannot open files encrypted after this change."
+            "Then export the keyring and import it on every other computer. An older copy cannot open files encrypted after this change."
         );
-        if vault::recovery_replacement_due(visit_dir(dir, visit))? {
+        if keyring::recovery_replacement_due(visit_dir(dir, visit))? {
             println!("The recovery code has been used. Add a FIDO2 key to replace it.");
         }
         println!();
@@ -326,7 +326,7 @@ fn view_keys(dir: &std::path::Path, visit: &mut Option<Visit>) -> Result<(), Err
     ensure_visit(dir, visit)?;
     let visit = visit.as_ref().expect("visit was just opened");
     debug::log("listing keys");
-    print_authorized_keys(&vault::list_members_unlocked(
+    print_authorized_keys(&keyring::list_members_unlocked(
         &visit.scratch,
         &visit.master,
     )?);
@@ -344,15 +344,15 @@ fn ensure_visit(dir: &std::path::Path, visit: &mut Option<Visit>) -> Result<(), 
     if visit.is_some() {
         return Ok(());
     }
-    println!("Unlock the vault.");
+    println!("Unlock the keyring.");
     let master = unlock_for_visit(dir)?;
-    if !vault::is_latest_master(dir, &master)? {
+    if !keyring::is_latest_master(dir, &master)? {
         return Err(Error::Other(
-            "This recovery code opens an older version of the vault. Use the latest recovery code to add or remove a key.".into(),
+            "This recovery code opens an older version of the keyring. Use the latest recovery code to add or remove a key.".into(),
         ));
     }
     let scratch = visit_scratch(dir);
-    vault::copy_vault(dir, &scratch)?;
+    keyring::copy_keyring(dir, &scratch)?;
     *visit = Some(Visit {
         scratch,
         master,
@@ -377,22 +377,22 @@ fn finish_visit(dir: &std::path::Path, visit: &mut Option<Visit>) -> Result<(), 
         return Ok(());
     }
     println!(
-        "This visit updates the vault. Save the new recovery code. Wardlet will then ask you to export it to your other computers."
+        "This visit updates the keyring. Save the new recovery code. Wardlet will then ask you to export it to your other computers."
     );
-    debug::log("creating the next vault version");
-    let mut display = vault::rotate_vault(&visit.scratch, &visit.master)?;
+    debug::log("creating the next keyring version");
+    let mut display = keyring::rotate_keyring(&visit.scratch, &visit.master)?;
     print_recovery_code(&display);
     let saved = confirm_recovery_saved()?;
     display.zeroize();
     if !saved {
         let _ = std::fs::remove_dir_all(&visit.scratch);
         clear_screen();
-        println!("The vault was not changed.");
+        println!("The keyring was not changed.");
         return Ok(());
     }
     clear_screen();
     commit_visit(dir, &visit.scratch)?;
-    println!("The vault is updated.");
+    println!("The keyring is updated.");
     println!(
         "Export it and import that file on every computer that uses it. An older copy cannot open files encrypted from now on."
     );
@@ -402,8 +402,8 @@ fn finish_visit(dir: &std::path::Path, visit: &mut Option<Visit>) -> Result<(), 
     Ok(())
 }
 
-/// A commit renames the vault aside, then the new vault into place. If the
-/// program died between those renames, put the previous vault back.
+/// A commit renames the keyring aside, then the new keyring into place. If the
+/// program died between those renames, put the previous keyring back.
 fn recover_interrupted_commit(dir: &Path) {
     if dir.exists() {
         return;
@@ -417,7 +417,7 @@ fn recover_interrupted_commit(dir: &Path) {
         if name.starts_with(".wardlet-previous-") && entry.path().is_dir() {
             if std::fs::rename(entry.path(), dir).is_ok() {
                 println!(
-                    "An earlier vault update was interrupted. The previous vault was restored at {}.",
+                    "An earlier keyring update was interrupted. The previous keyring was restored at {}.",
                     dir.display()
                 );
             }
@@ -426,15 +426,15 @@ fn recover_interrupted_commit(dir: &Path) {
     }
 }
 
-fn commit_visit(vault: &std::path::Path, scratch: &std::path::Path) -> Result<(), Error> {
-    let parent = vault.parent().unwrap_or_else(|| std::path::Path::new("."));
+fn commit_visit(keyring: &std::path::Path, scratch: &std::path::Path) -> Result<(), Error> {
+    let parent = keyring.parent().unwrap_or_else(|| std::path::Path::new("."));
     let mut bytes = [0u8; 4];
     rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut bytes);
     let name: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
     let holding = parent.join(format!(".wardlet-previous-{name}"));
-    std::fs::rename(vault, &holding).map_err(Error::io)?;
-    if let Err(err) = std::fs::rename(scratch, vault) {
-        let _ = std::fs::rename(&holding, vault);
+    std::fs::rename(keyring, &holding).map_err(Error::io)?;
+    if let Err(err) = std::fs::rename(scratch, keyring) {
+        let _ = std::fs::rename(&holding, keyring);
         return Err(Error::io(err));
     }
     std::fs::remove_dir_all(holding).map_err(Error::io)
@@ -445,11 +445,11 @@ fn unlock_for_visit(dir: &std::path::Path) -> Result<Master, Error> {
     println!("r) Recovery code");
     loop {
         match prompt_line(">")?.trim() {
-            "f" | "F" => return fido::unlock_vault_with_hardware(dir),
+            "f" | "F" => return fido::unlock_keyring_with_hardware(dir),
             "r" | "R" => {
                 debug::log("unlocking the visit with the recovery code");
                 let mut typed = prompt_recovery_code()?;
-                let master = vault::unlock_with_recovery_code(dir, &typed);
+                let master = keyring::unlock_with_recovery_code(dir, &typed);
                 typed.zeroize();
                 return master;
             }
@@ -459,33 +459,33 @@ fn unlock_for_visit(dir: &std::path::Path) -> Result<Master, Error> {
 }
 
 fn export_cmd(dir: Option<PathBuf>, file: &std::path::Path) -> Result<(), Error> {
-    let dir = vault_dir(dir)?;
-    debug::log("exporting the vault");
-    vault::export_vault(&dir, file)?;
+    let dir = keyring_dir(dir)?;
+    debug::log("exporting the keyring");
+    keyring::export_keyring(&dir, file)?;
     println!("Wrote {}", file.display());
     println!(
-        "This file is the vault. The recovery code is not in it. Keep that code where you already stored it."
+        "This file is the keyring. The recovery code is not in it. Keep that code where you already stored it."
     );
     println!("Encrypted files are not in it. They stay where you put them.");
     println!("Copy this file to another machine and run wardlet import.");
-    println!("That machine can then decrypt files encrypted with this vault.");
+    println!("That machine can then decrypt files encrypted with this keyring.");
     Ok(())
 }
 
 fn import_cmd(dir: Option<PathBuf>, file: &std::path::Path) -> Result<(), Error> {
-    let dir = vault_dir(dir)?;
-    debug::log("importing a vault");
-    vault::import_vault(file, &dir)?;
-    println!("Vault imported at {}", dir.display());
+    let dir = keyring_dir(dir)?;
+    debug::log("importing a keyring");
+    keyring::import_keyring(file, &dir)?;
+    println!("Keyring imported at {}", dir.display());
     println!(
-        "The same FIDO2 keys unlock this vault. The recovery code still has to come from wherever it was saved."
+        "The same FIDO2 keys unlock this keyring. The recovery code still has to come from wherever it was saved."
     );
     Ok(())
 }
 
 fn keys(dir: Option<PathBuf>, json: bool) -> Result<(), Error> {
-    let dir = vault_dir(dir)?;
-    let members = vault::list_members(&dir)?;
+    let dir = keyring_dir(dir)?;
+    let members = keyring::list_members(&dir)?;
     if json {
         println!("{}", members_json(&members));
     } else {
@@ -505,7 +505,7 @@ fn keys(dir: Option<PathBuf>, json: bool) -> Result<(), Error> {
             println!("{}  {kind}  last used {used}", member.id);
         }
         println!(
-            "Names are sealed in the vault. Run wardlet config and choose v) View keys to see them."
+            "Names are sealed in the keyring. Run wardlet config and choose v) View keys to see them."
         );
     }
     Ok(())
@@ -513,7 +513,7 @@ fn keys(dir: Option<PathBuf>, json: bool) -> Result<(), Error> {
 
 fn add_user(dir: &std::path::Path, master: &Master) -> Result<(), Error> {
     debug::log("adding a key");
-    println!("Vault unlocked.");
+    println!("Keyring unlocked.");
     println!("Enroll the new key.");
     let label = prompt_key_name("Label for the new key")?;
 
@@ -521,26 +521,26 @@ fn add_user(dir: &std::path::Path, master: &Master) -> Result<(), Error> {
     let mut enrolled = fido::enroll_hardware_member(&label)?;
     debug::log("writing the new key wrapper");
     let added =
-        vault::add_hardware_member_unlocked(dir, master, &label, &enrolled.hmac, &enrolled.params);
+        keyring::add_hardware_member_unlocked(dir, master, &label, &enrolled.hmac, &enrolled.params);
     enrolled.hmac.zeroize();
     let added = added?;
     println!(
         "Added {} on {} ({})",
         added.label, enrolled.params.key_product, added.id
     );
-    print_authorized_keys(&vault::list_members_unlocked(dir, master)?);
+    print_authorized_keys(&keyring::list_members_unlocked(dir, master)?);
     Ok(())
 }
 
 fn recover(dir: Option<PathBuf>) -> Result<(), Error> {
-    let dir = vault_dir(dir)?;
+    let dir = keyring_dir(dir)?;
     print_banner();
     debug::log("unlocking with the recovery code");
     let mut typed = prompt_recovery_code()?;
-    let master = vault::unlock_with_recovery_code(&dir, &typed);
+    let master = keyring::unlock_with_recovery_code(&dir, &typed);
     typed.zeroize();
     drop(master?);
-    println!("Vault unlocked with the recovery code.");
+    println!("Keyring unlocked with the recovery code.");
     println!("This code still works, including any copy you made, until you replace it.");
     println!("Add a FIDO2 key from `wardlet config`. Wardlet will then show a new recovery code.");
     Ok(())
@@ -555,7 +555,7 @@ fn print_recovery_code(code: &str) {
         "Wardlet does not keep a copy. If you do not save it now, it is gone.",
         "",
         "This is the only way back in if every FIDO2 key is lost.",
-        "Store it in a password manager vault or a secure note.",
+        "Store it in a password manager keyring or a secure note.",
         "Do not store it in a file on this computer.",
         "",
         code,
@@ -631,7 +631,7 @@ fn clear_screen() {
 }
 
 fn remove_user(dir: &std::path::Path, master: &Master) -> Result<bool, Error> {
-    let members = vault::list_members(dir)?;
+    let members = keyring::list_members(dir)?;
     if members.len() <= 1 {
         println!("The last key cannot be removed.");
         println!(
@@ -640,8 +640,8 @@ fn remove_user(dir: &std::path::Path, master: &Master) -> Result<bool, Error> {
         return Ok(false);
     }
     debug::log("removing a key");
-    println!("Vault unlocked.");
-    let members = vault::list_members_unlocked(dir, master)?;
+    println!("Keyring unlocked.");
+    let members = keyring::list_members_unlocked(dir, master)?;
     print_authorized_keys(&members);
     println!();
     let label = prompt_key_name("Label of the key to remove")?;
@@ -660,7 +660,7 @@ fn remove_user(dir: &std::path::Path, master: &Master) -> Result<bool, Error> {
         println!("Removal cancelled.");
         return Ok(false);
     }
-    vault::remove_member_unlocked(dir, master, &label)?;
+    keyring::remove_member_unlocked(dir, master, &label)?;
     println!("Removed {}", member.label);
     if members.len() == 2 {
         println!(
@@ -680,12 +680,12 @@ fn encrypt(
     force: bool,
 ) -> Result<(), Error> {
     debug::log("encrypting named paths");
-    let dir = vault_dir(dir)?;
+    let dir = keyring_dir(dir)?;
     if !dir.join("config.toml").is_file() {
-        return Err(Error::VaultNotFound);
+        return Err(Error::KeyringNotFound);
     }
     let suffix = file_suffix(&dir);
-    let stamp = vault_stamp(&dir)?;
+    let stamp = keyring_stamp(&dir)?;
     let request = ops::EncryptRequest {
         paths,
         recursive,
@@ -698,9 +698,9 @@ fn encrypt(
     };
     ops::preflight_encrypt(&request)?;
     let master = unlock_existing(&dir)?;
-    if !vault::is_latest_master(&dir, &master)? {
+    if !keyring::is_latest_master(&dir, &master)? {
         return Err(Error::Other(
-            "This key opens an older version of this vault. Import the newer vault before encrypting.".into(),
+            "This key opens an older version of this keyring. Import the newer keyring before encrypting.".into(),
         ));
     }
     let actions = ops::encrypt_paths(&master, &request)?;
@@ -722,9 +722,9 @@ fn decrypt(
     force: bool,
 ) -> Result<(), Error> {
     debug::log("decrypting named paths");
-    let dir = vault_dir(dir)?;
+    let dir = keyring_dir(dir)?;
     if !dir.join("config.toml").is_file() {
-        return Err(Error::VaultNotFound);
+        return Err(Error::KeyringNotFound);
     }
     let suffix = file_suffix(&dir);
     let request = ops::DecryptRequest {
@@ -736,16 +736,16 @@ fn decrypt(
     };
     ops::preflight_decrypt(&request)?;
     let master = unlock_existing(&dir)?;
-    let stamp = vault_stamp(&dir)?;
-    let chain = vault::masters_covering(&dir, master)?;
-    let actions = ops::decrypt_vault(&chain, &stamp.vault_id, stamp.version, &request)?;
+    let stamp = keyring_stamp(&dir)?;
+    let chain = keyring::masters_covering(&dir, master)?;
+    let actions = ops::decrypt_keyring(&chain, &stamp.keyring_id, stamp.version, &request)?;
     report_actions(&actions, "decrypted");
     Ok(())
 }
 
 fn edit(dir: Option<PathBuf>, file: &Path) -> Result<(), Error> {
-    debug::log("editing a vault file");
-    let dir = vault_dir(dir)?;
+    debug::log("editing a locked file");
+    let dir = keyring_dir(dir)?;
     let suffix = file_suffix(&dir);
     let ciphertext = resolve_edit_ciphertext(file, &suffix)?;
     let plain_name = plaintext_name(&ciphertext, &suffix)?;
@@ -756,17 +756,17 @@ fn edit(dir: Option<PathBuf>, file: &Path) -> Result<(), Error> {
             natural_plain.display()
         )));
     }
-    let vault = vault_stamp(&dir)?;
+    let keyring = keyring_stamp(&dir)?;
     match ops::file_stamp(&ciphertext)? {
         None => {
             return Err(Error::Other(format!(
-                "{} was not encrypted with a Wardlet vault. Use wardlet dec and wardlet enc for this file.",
+                "{} was not encrypted with a Wardlet keyring. Use wardlet dec and wardlet enc for this file.",
                 ciphertext.display()
             )));
         }
-        Some(stamp) if stamp.vault_id != vault.vault_id => {
+        Some(stamp) if stamp.keyring_id != keyring.keyring_id => {
             return Err(Error::Other(format!(
-                "{} belongs to a different vault. Import that vault, then edit again.",
+                "{} belongs to a different keyring. Import that keyring, then edit again.",
                 ciphertext.display()
             )));
         }
@@ -775,13 +775,13 @@ fn edit(dir: Option<PathBuf>, file: &Path) -> Result<(), Error> {
 
     let before = file_fingerprint(&ciphertext);
     let master = unlock_latest(&dir)?;
-    let chain = vault::masters_covering(&dir, master)?;
+    let chain = keyring::masters_covering(&dir, master)?;
     let work = editor_work_dir(&ciphertext)?;
     let plain = work.join(&plain_name);
-    let decrypt_result = ops::decrypt_vault(
+    let decrypt_result = ops::decrypt_keyring(
         &chain,
-        &vault.vault_id,
-        vault.version,
+        &keyring.keyring_id,
+        keyring.version,
         &ops::DecryptRequest {
             paths: std::slice::from_ref(&ciphertext),
             recursive: false,
@@ -819,8 +819,8 @@ fn edit(dir: Option<PathBuf>, file: &Path) -> Result<(), Error> {
 }
 
 fn new_file(dir: Option<PathBuf>, file: &Path) -> Result<(), Error> {
-    debug::log("creating a vault file");
-    let dir = vault_dir(dir)?;
+    debug::log("creating a locked file");
+    let dir = keyring_dir(dir)?;
     let suffix = file_suffix(&dir);
     let (ciphertext, plain_name) = resolve_new_paths(file, &suffix)?;
     let natural_plain = path_parent(&ciphertext).join(&plain_name);
@@ -863,9 +863,9 @@ fn new_file(dir: Option<PathBuf>, file: &Path) -> Result<(), Error> {
 
 fn unlock_latest(dir: &Path) -> Result<Master, Error> {
     let master = unlock_existing(dir)?;
-    if !vault::is_latest_master(dir, &master)? {
+    if !keyring::is_latest_master(dir, &master)? {
         return Err(Error::Other(
-            "This key opens an older version of this vault. Import the newer vault before encrypting.".into(),
+            "This key opens an older version of this keyring. Import the newer keyring before encrypting.".into(),
         ));
     }
     Ok(master)
@@ -916,7 +916,7 @@ fn finish_editor_encrypt(
         return Err(Error::Other("ciphertext changed during edit".into()));
     }
 
-    let stamp = vault_stamp(dir)?;
+    let stamp = keyring_stamp(dir)?;
     let encrypt_result = ops::encrypt_paths(
         master,
         &ops::EncryptRequest {
@@ -989,7 +989,7 @@ fn resolve_edit_ciphertext(file: &Path, suffix: &str) -> Result<PathBuf, Error> 
             return Ok(age);
         }
         return Err(Error::Other(format!(
-            "{} is not a vault file. Pass the .age file, or a name that has one beside it.",
+            "{} is not a locked Wardlet file. Pass the .age file, or a name that has one beside it.",
             file.display()
         )));
     }
@@ -1106,12 +1106,12 @@ fn spawn_editor(editor: &std::ffi::OsStr, path: &Path) -> io::Result<std::proces
     ProcessCommand::new(editor).arg(path).status()
 }
 
-fn vault_stamp(dir: &std::path::Path) -> Result<ops::FileStamp, Error> {
+fn keyring_stamp(dir: &std::path::Path) -> Result<ops::FileStamp, Error> {
     let text = std::fs::read_to_string(dir.join("config.toml")).map_err(Error::io)?;
-    let config = vault::load_config(&text)?;
-    let version = vault::vault_version(&config);
+    let config = keyring::load_config(&text)?;
+    let version = keyring::keyring_version(&config);
     Ok(ops::FileStamp {
-        vault_id: config.vault_id,
+        keyring_id: config.keyring_id,
         version,
     })
 }
@@ -1145,7 +1145,7 @@ fn file_suffix(dir: &std::path::Path) -> String {
     let Ok(text) = std::fs::read_to_string(dir.join("config.toml")) else {
         return ".age".into();
     };
-    vault::load_config(&text)
+    keyring::load_config(&text)
         .map(|config| config.settings.encryption_output_suffix)
         .unwrap_or_else(|_| ".age".into())
 }
@@ -1170,45 +1170,45 @@ fn report_actions(actions: &[FileAction], verb: &str) {
 }
 
 fn unlock_existing(dir: &std::path::Path) -> Result<Master, Error> {
-    if !vault::has_hardware_member(dir)? {
-        return Err(Error::Other("vault has no FIDO2 key".into()));
+    if !keyring::has_hardware_member(dir)? {
+        return Err(Error::Other("keyring has no FIDO2 key".into()));
     }
     debug::log("unlocking with a FIDO2 key");
-    fido::unlock_vault_with_hardware(dir)
+    fido::unlock_keyring_with_hardware(dir)
 }
 
 fn status(dir: Option<PathBuf>, json: bool) -> Result<(), Error> {
-    debug::log("reading vault status");
-    let dir = vault_dir(dir)?;
+    debug::log("reading keyring status");
+    let dir = keyring_dir(dir)?;
     recover_interrupted_commit(&dir);
     let text = match std::fs::read_to_string(dir.join("config.toml")) {
         Ok(text) => text,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Err(Error::VaultNotFound);
+            return Err(Error::KeyringNotFound);
         }
         Err(err) => return Err(Error::io(err)),
     };
-    let config = vault::load_config(&text)?;
+    let config = keyring::load_config(&text)?;
     let keys = config
         .keys
         .iter()
-        .filter(|key| key.mechanism != vault::RECOVERY_MECHANISM)
+        .filter(|key| key.mechanism != keyring::RECOVERY_MECHANISM)
         .count();
     let recovery = config
         .keys
         .iter()
-        .any(|key| key.mechanism == vault::RECOVERY_MECHANISM);
-    let version = vault::vault_version(&config);
+        .any(|key| key.mechanism == keyring::RECOVERY_MECHANISM);
+    let version = keyring::keyring_version(&config);
     if json {
         println!(
-            "{{\"vault\":\"{}\",\"format_version\":{},\"version\":{version},\"keys\":{keys},\"recovery\":{recovery}}}",
+            "{{\"keyring\":\"{}\",\"format_version\":{},\"version\":{version},\"keys\":{keys},\"recovery\":{recovery}}}",
             json_escape(&dir.display().to_string()),
             config.format_version,
         );
         return Ok(());
     }
     let noun = if keys == 1 { "key" } else { "keys" };
-    println!("Vault: {}", dir.display());
+    println!("Keyring: {}", dir.display());
     println!("Format: {}", config.format_version);
     println!("Version: {version}");
     println!("Keys: {keys} {noun}");
@@ -1221,7 +1221,7 @@ fn status(dir: Option<PathBuf>, json: bool) -> Result<(), Error> {
         .keys
         .iter()
         .map(|key| {
-            if key.mechanism == vault::RECOVERY_MECHANISM {
+            if key.mechanism == keyring::RECOVERY_MECHANISM {
                 format!("keys/{}.age", key.id)
             } else {
                 format!("keys/{}.mask", key.id)
@@ -1282,7 +1282,7 @@ fn command_name(command: &Command) -> &'static str {
     }
 }
 
-fn vault_dir(dir: Option<PathBuf>) -> Result<PathBuf, Error> {
+fn keyring_dir(dir: Option<PathBuf>) -> Result<PathBuf, Error> {
     match dir {
         Some(dir) => Ok(dir),
         None => default_dir(),

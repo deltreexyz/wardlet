@@ -52,7 +52,7 @@ Good for: SSH keys, `.env` files, tax documents, password-manager exports, scans
 2. **enc — lock a file.** `wardlet enc taxes.pdf` writes a locked copy beside the original, in the same folder. You decide when to delete the original. Files stay where they are.
 3. **dec — tap to open.** `wardlet dec taxes.pdf.age` — plug in a key and tap it. Without a key, the file can't be read.
 
-> **Changing keys creates a new recovery code.** Adding or removing a key shows a new recovery code once. Store it before you close the terminal. The old recovery code can still open files locked before the change. The new code opens files locked after it, and can open earlier files through the current vault (the small folder that holds your key settings, not your files).
+> **Changing keys creates a new recovery code.** Adding or removing a key shows a new recovery code once. Store it before you close the terminal. The old recovery code can still open files locked before the change. The new code opens files locked after it, and can open earlier files through the current keyring.
 
 ## Why it's different
 
@@ -67,16 +67,16 @@ Good for: SSH keys, `.env` files, tax documents, password-manager exports, scans
 
 `wardlet new notes.txt` creates a locked file in your editor, and `wardlet edit notes.txt.age` opens one and locks it again when you quit. The editor is `$EDITOR` if set, otherwise nano, falling back to vi.
 
-`wardlet config` adds or removes keys, then saves the vault once when you quit and shows a new recovery code. After a change, export the vault and import it on every other computer. An older copy cannot open files locked after the change. The recovery code is not inside the export.
+`wardlet config` adds or removes keys, then saves the keyring once when you quit and shows a new recovery code. After a change, export the keyring and import it on every other computer. An older copy cannot open files locked after the change. The recovery code is not inside the export.
 
-`wardlet status` prints the vault version without unlocking. Version 1 means your key settings haven't changed since setup.
+`wardlet status` prints the keyring version without unlocking. Version 1 means your key settings haven't changed since setup.
 
 An existing locked file is not overwritten unless you pass `--force`.
 
 ## FAQ
 
 **How is this different from age plus a FIDO plugin?**
-Underneath, Wardlet uses the age format and FIDO2 hmac-secret — the same building blocks as plugins like `age-plugin-fido2-hmac`. The difference is the product around them: Wardlet enrolls several keys and a recovery code in one vault, locks files beside the originals, and lets you add a key without rewriting existing locked files. If you already live in the `age` CLI and manage recipients yourself, a plugin may be enough. Wardlet is for people who want that workflow packaged.
+Underneath, Wardlet uses the age format and FIDO2 hmac-secret — the same building blocks as plugins like `age-plugin-fido2-hmac`. The difference is the product around them: Wardlet enrolls several keys and a recovery code in one keyring, locks files beside the originals, and lets you add a key without rewriting existing locked files. If you already live in the `age` CLI and manage recipients yourself, a plugin may be enough. Wardlet is for people who want that workflow packaged.
 
 **What are the limits?**
 - You need compatible FIDO2 keys. Older keys (YubiKey 4, Trezor One, and similar) are not supported. See [wardlet.com/#devices](https://wardlet.com/#devices).
@@ -86,7 +86,7 @@ Underneath, Wardlet uses the age format and FIDO2 hmac-secret — the same build
 - Linux CLI today. Packaged downloads and other platforms come later.
 
 **If I remove a key, is it revoked from old files?**
-No. Removing a key updates the vault so that key cannot open files locked *after* the change. Files locked before the change are still tied to an older copy of your key settings. Anyone with that key and an older vault copy can still open them. To cut a key off: remove it, re-encrypt the files you care about, then delete the old locked copies and any old vault export.
+No. Removing a key updates the keyring so that key cannot open files locked *after* the change. Files locked before the change are still tied to an older copy of your key settings. Anyone with that key and an older keyring copy can still open them. To cut a key off: remove it, re-encrypt the files you care about, then delete the old locked copies and any old keyring export.
 
 **What if I lose every key?**
 Use the recovery code shown once at setup (and again after you change keys in `wardlet config`). Store it in a password manager. Wardlet keeps no copy. Lose every key and the code, and the locked files cannot be opened.
@@ -96,7 +96,7 @@ No. There's no mounted drive or container file. Each file is locked on its own, 
 
 ## Desktop app (Linux)
 
-An early GUI shares the same vault and files as the CLI:
+An early GUI shares the same keyring and files as the CLI:
 
 ```bash
 cargo run -p wardlet-gui

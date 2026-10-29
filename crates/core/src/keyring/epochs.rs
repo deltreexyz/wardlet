@@ -1,6 +1,6 @@
 //! Later masters created when a config visit adds or removes keys.
 //!
-//! The newest master opens every earlier one. An older copy of the vault
+//! The newest master opens every earlier one. An older copy of the keyring
 //! never receives the newest master, so it cannot open files encrypted after
 //! the change.
 
@@ -9,21 +9,21 @@ use std::path::Path;
 
 use crate::Error;
 use crate::master::Master;
-use crate::vault::format::{self, FORMAT_VERSION_CHAIN, Generation};
-use crate::vault::keys;
-use crate::vault::members::{self, FIDO2_MECHANISM, RECOVERY_MECHANISM};
-use crate::vault::names;
-use crate::vault::{create_private_dir, sync_dir, write_atomic};
+use crate::keyring::format::{self, FORMAT_VERSION_CHAIN, Generation};
+use crate::keyring::keys;
+use crate::keyring::members::{self, FIDO2_MECHANISM, RECOVERY_MECHANISM};
+use crate::keyring::names;
+use crate::keyring::{create_private_dir, sync_dir, write_atomic};
 
-/// One new master for the vault in `dir`. Returns the recovery code to show once.
-pub fn rotate_vault(dir: &Path, current: &Master) -> Result<String, Error> {
+/// One new master for the keyring in `dir`. Returns the recovery code to show once.
+pub fn rotate_keyring(dir: &Path, current: &Master) -> Result<String, Error> {
     let mut config = members::load_config_file(dir)?;
     if current.recipient() != config.master_recipient {
         return Err(Error::Other(
-            "this recovery code opens an older version of the vault. Use the latest recovery code to add or remove a key.".into(),
+            "this recovery code opens an older version of the keyring. Use the latest recovery code to add or remove a key.".into(),
         ));
     }
-    let previous_epoch = format::vault_version(&config);
+    let previous_epoch = format::keyring_version(&config);
     let next = Master::generate();
     let next_recipient = next.recipient();
     let sealed_previous = keys::seal_mask(current, &next_recipient)?;
@@ -84,7 +84,7 @@ pub fn masters_covering(dir: &Path, unlocked: Master) -> Result<Vec<Master>, Err
         let path = dir.join(&relative);
         if !path.is_file() {
             return Err(Error::Other(format!(
-                "vault is missing {relative}; this copy is incomplete. Import the vault again."
+                "keyring is missing {relative}; this copy is incomplete. Import the keyring again."
             )));
         }
         let bytes = fs::read(&path).map_err(Error::io)?;
@@ -97,7 +97,7 @@ pub fn masters_covering(dir: &Path, unlocked: Master) -> Result<Vec<Master>, Err
             && older.recipient() != generation.recipient
         {
             return Err(Error::Other(format!(
-                "{relative} does not match the vault record for version {}",
+                "{relative} does not match the keyring record for version {}",
                 epoch - 1
             )));
         }
@@ -109,14 +109,14 @@ pub fn masters_covering(dir: &Path, unlocked: Master) -> Result<Vec<Master>, Err
 
 fn epoch_number(config: &format::Config, recipient: &str) -> Result<u32, Error> {
     if recipient == config.master_recipient {
-        return Ok(format::vault_version(config));
+        return Ok(format::keyring_version(config));
     }
     config
         .generations
         .iter()
         .find(|generation| generation.recipient == recipient)
         .map(|generation| generation.epoch)
-        .ok_or_else(|| Error::Other("this key does not open this vault version".into()))
+        .ok_or_else(|| Error::Other("this key does not open this keyring version".into()))
 }
 
 fn park_recovery(dir: &Path, config: &mut format::Config, epoch: u32) -> Result<(), Error> {
@@ -158,12 +158,12 @@ fn random_id() -> String {
 mod tests {
     use std::fs;
 
-    use super::{masters_covering, rotate_vault};
+    use super::{masters_covering, rotate_keyring};
     use crate::master::Master;
-    use crate::ops::{DecryptRequest, EncryptRequest, decrypt_vault, encrypt_paths};
-    use crate::vault::format::{self, load_config};
-    use crate::vault::init_hardware_vault;
-    use crate::vault::members::{
+    use crate::ops::{DecryptRequest, EncryptRequest, decrypt_keyring, encrypt_paths};
+    use crate::keyring::format::{self, load_config};
+    use crate::keyring::init_hardware_keyring;
+    use crate::keyring::members::{
         HardwareMemberParams, add_hardware_member_unlocked, unlock_with_hmac,
         unlock_with_recovery_code,
     };
@@ -211,7 +211,7 @@ mod tests {
                 force: false,
                 suffix: ".age",
                 stamp: Some(crate::ops::FileStamp {
-                    vault_id: "vault".into(),
+                    keyring_id: "keyring".into(),
                     version,
                 }),
             },
@@ -222,26 +222,26 @@ mod tests {
     #[test]
     fn a_later_master_opens_old_files_and_the_old_master_does_not_open_new_files() {
         let dir = TempDir::new();
-        let vault = dir.0.join("vault");
+        let keyring = dir.0.join("keyring");
         let hmac = [0x21u8; 32];
-        let created = init_hardware_vault(&vault, "one", &hmac, &params("one")).unwrap();
+        let created = init_hardware_keyring(&keyring, "one", &hmac, &params("one")).unwrap();
         let old_code = created.recovery_code.clone();
         let first = created.master;
         let plain = dir.0.join("early.txt");
         encrypt_to(&first, &plain, b"early", 1);
 
         let second_hmac = [0x22u8; 32];
-        add_hardware_member_unlocked(&vault, &first, "two", &second_hmac, &params("two")).unwrap();
+        add_hardware_member_unlocked(&keyring, &first, "two", &second_hmac, &params("two")).unwrap();
         let third_hmac = [0x23u8; 32];
-        add_hardware_member_unlocked(&vault, &first, "three", &third_hmac, &params("three"))
+        add_hardware_member_unlocked(&keyring, &first, "three", &third_hmac, &params("three"))
             .unwrap();
-        let new_code = rotate_vault(&vault, &first).unwrap();
-        let config = load_config(&fs::read_to_string(vault.join("config.toml")).unwrap()).unwrap();
-        assert_eq!(format::vault_version(&config), 2);
+        let new_code = rotate_keyring(&keyring, &first).unwrap();
+        let config = load_config(&fs::read_to_string(keyring.join("config.toml")).unwrap()).unwrap();
+        assert_eq!(format::keyring_version(&config), 2);
 
-        let latest = unlock_with_hmac(&vault, &hmac).unwrap();
+        let latest = unlock_with_hmac(&keyring, &hmac).unwrap();
         assert_ne!(latest.recipient(), first.recipient());
-        let chain = masters_covering(&vault, latest).unwrap();
+        let chain = masters_covering(&keyring, latest).unwrap();
         assert!(
             chain
                 .iter()
@@ -249,9 +249,9 @@ mod tests {
         );
 
         let early = dir.0.join("early-out.txt");
-        decrypt_vault(
+        decrypt_keyring(
             &chain,
-            "vault",
+            "keyring",
             2,
             &DecryptRequest {
                 paths: &[plain.with_extension("txt.age")],
@@ -267,9 +267,9 @@ mod tests {
         let later_plain = dir.0.join("later.txt");
         encrypt_to(chain.first().unwrap(), &later_plain, b"later", 2);
         let only_old = std::slice::from_ref(&first);
-        let err = decrypt_vault(
+        let err = decrypt_keyring(
             only_old,
-            "vault",
+            "keyring",
             1,
             &DecryptRequest {
                 paths: &[later_plain.with_extension("txt.age")],
@@ -284,12 +284,12 @@ mod tests {
         assert!(message.contains("version 2"));
         assert!(message.contains("version 1"));
 
-        let old_master = unlock_with_recovery_code(&vault, &old_code).unwrap();
+        let old_master = unlock_with_recovery_code(&keyring, &old_code).unwrap();
         assert_eq!(old_master.recipient(), first.recipient());
-        let old_chain = masters_covering(&vault, old_master).unwrap();
-        decrypt_vault(
+        let old_chain = masters_covering(&keyring, old_master).unwrap();
+        decrypt_keyring(
             &old_chain,
-            "vault",
+            "keyring",
             1,
             &DecryptRequest {
                 paths: &[plain.with_extension("txt.age")],
@@ -300,9 +300,9 @@ mod tests {
             },
         )
         .unwrap();
-        let err = decrypt_vault(
+        let err = decrypt_keyring(
             &old_chain,
-            "vault",
+            "keyring",
             1,
             &DecryptRequest {
                 paths: &[later_plain.with_extension("txt.age")],
@@ -315,43 +315,43 @@ mod tests {
         .unwrap_err();
         assert!(err.to_string().contains("version 2"));
 
-        let newest = unlock_with_recovery_code(&vault, &new_code).unwrap();
+        let newest = unlock_with_recovery_code(&keyring, &new_code).unwrap();
         assert_eq!(newest.recipient(), chain[0].recipient());
 
-        let again = unlock_with_hmac(&vault, &hmac).unwrap();
-        rotate_vault(&vault, &again).unwrap();
-        let config = load_config(&fs::read_to_string(vault.join("config.toml")).unwrap()).unwrap();
-        assert_eq!(format::vault_version(&config), 3);
-        let chain = masters_covering(&vault, unlock_with_hmac(&vault, &hmac).unwrap()).unwrap();
+        let again = unlock_with_hmac(&keyring, &hmac).unwrap();
+        rotate_keyring(&keyring, &again).unwrap();
+        let config = load_config(&fs::read_to_string(keyring.join("config.toml")).unwrap()).unwrap();
+        assert_eq!(format::keyring_version(&config), 3);
+        let chain = masters_covering(&keyring, unlock_with_hmac(&keyring, &hmac).unwrap()).unwrap();
         assert_eq!(chain.len(), 3);
     }
 
     #[test]
     fn a_missing_epoch_file_is_named() {
         let dir = TempDir::new();
-        let vault = dir.0.join("vault");
+        let keyring = dir.0.join("keyring");
         let hmac = [0x32u8; 32];
-        let created = init_hardware_vault(&vault, "one", &hmac, &params("one")).unwrap();
-        rotate_vault(&vault, &created.master).unwrap();
-        fs::remove_file(vault.join("epochs").join("1.age")).unwrap();
-        let latest = unlock_with_hmac(&vault, &hmac).unwrap();
-        let err = masters_covering(&vault, latest).unwrap_err();
+        let created = init_hardware_keyring(&keyring, "one", &hmac, &params("one")).unwrap();
+        rotate_keyring(&keyring, &created.master).unwrap();
+        fs::remove_file(keyring.join("epochs").join("1.age")).unwrap();
+        let latest = unlock_with_hmac(&keyring, &hmac).unwrap();
+        let err = masters_covering(&keyring, latest).unwrap_err();
         assert!(err.to_string().contains("epochs/1.age"), "{err}");
     }
 
     #[test]
-    fn declining_the_new_recovery_code_leaves_the_original_vault() {
+    fn declining_the_new_recovery_code_leaves_the_original_keyring() {
         let dir = TempDir::new();
-        let vault = dir.0.join("vault");
+        let keyring = dir.0.join("keyring");
         let hmac = [0x31u8; 32];
-        let created = init_hardware_vault(&vault, "one", &hmac, &params("one")).unwrap();
+        let created = init_hardware_keyring(&keyring, "one", &hmac, &params("one")).unwrap();
         let copy = dir.0.join("copy");
-        crate::vault::copy_vault(&vault, &copy).unwrap();
-        let _code = rotate_vault(&copy, &created.master).unwrap();
+        crate::keyring::copy_keyring(&keyring, &copy).unwrap();
+        let _code = rotate_keyring(&copy, &created.master).unwrap();
         fs::remove_dir_all(&copy).unwrap();
-        let config = load_config(&fs::read_to_string(vault.join("config.toml")).unwrap()).unwrap();
-        assert_eq!(format::vault_version(&config), 1);
-        let opened = unlock_with_hmac(&vault, &hmac).unwrap();
+        let config = load_config(&fs::read_to_string(keyring.join("config.toml")).unwrap()).unwrap();
+        assert_eq!(format::keyring_version(&config), 1);
+        let opened = unlock_with_hmac(&keyring, &hmac).unwrap();
         assert_eq!(opened.recipient(), created.master.recipient());
     }
 }

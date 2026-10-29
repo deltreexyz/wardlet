@@ -1,4 +1,4 @@
-//! One-file copy of a vault directory.
+//! One-file copy of a keyring directory.
 //!
 //! The container is not an archive tool's format. Wardlet is the only reader,
 //! so the same bytes import on Linux, macOS, and Windows.
@@ -8,15 +8,15 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 
 use crate::Error;
-use crate::vault::{create_private_dir, load_config, sync_dir};
+use crate::keyring::{create_private_dir, load_config, sync_dir};
 
-const MARKER: &str = "WARDLET-VAULT";
+const MARKER: &str = "WARDLET-KEYRING";
 const CONTAINER_VERSION: u32 = 1;
 const MAX_FILE_BYTES: u64 = 16 * 1024 * 1024;
 
-pub fn export_vault(dir: &Path, destination: &Path) -> Result<(), Error> {
+pub fn export_keyring(dir: &Path, destination: &Path) -> Result<(), Error> {
     if !dir.join("config.toml").is_file() {
-        return Err(Error::VaultNotFound);
+        return Err(Error::KeyringNotFound);
     }
     if destination.exists() {
         return Err(Error::Other(format!(
@@ -48,23 +48,23 @@ pub fn export_vault(dir: &Path, destination: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// A bare file name such as `vault.wardlet` has an empty parent. Sync `.` instead.
+/// A bare file name such as `keyring.wardlet` has an empty parent. Sync `.` instead.
 fn output_directory(path: &Path) -> &Path {
     path.parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
 }
 
-pub fn import_vault(file: &Path, destination: &Path) -> Result<(), Error> {
+pub fn import_keyring(file: &Path, destination: &Path) -> Result<(), Error> {
     if destination.join("config.toml").exists() {
-        return Err(Error::VaultExists);
+        return Err(Error::KeyringExists);
     }
     let mut reader = BufReader::new(File::open(file).map_err(Error::io)?);
     let mut header = String::new();
     reader.read_line(&mut header).map_err(Error::io)?;
     if header.trim_end() != format!("{MARKER} {CONTAINER_VERSION}") {
         return Err(Error::Other(
-            "this file is not a Wardlet vault export".into(),
+            "this file is not a Wardlet keyring export".into(),
         ));
     }
     let mut stored = Vec::new();
@@ -79,19 +79,19 @@ pub fn import_vault(file: &Path, destination: &Path) -> Result<(), Error> {
             continue;
         }
         if !allowed_path(relative) {
-            return Err(Error::Other(format!("refusing vault entry {relative}")));
+            return Err(Error::Other(format!("refusing keyring entry {relative}")));
         }
         if stored.iter().any(|(path, _)| path == relative) {
-            return Err(Error::Other(format!("vault export lists {relative} twice")));
+            return Err(Error::Other(format!("keyring export lists {relative} twice")));
         }
         let mut length_line = String::new();
         if reader.read_line(&mut length_line).map_err(Error::io)? == 0 {
-            return Err(Error::Other("vault export ended early".into()));
+            return Err(Error::Other("keyring export ended early".into()));
         }
         let length: u64 = length_line
             .trim_end()
             .parse()
-            .map_err(|_| Error::Other(format!("vault entry {relative} has a bad length")))?;
+            .map_err(|_| Error::Other(format!("keyring entry {relative} has a bad length")))?;
         if length > MAX_FILE_BYTES {
             return Err(Error::Other(format!("{relative} is too large to import")));
         }
@@ -100,7 +100,7 @@ pub fn import_vault(file: &Path, destination: &Path) -> Result<(), Error> {
         stored.push((relative.to_owned(), bytes));
     }
     let Some((_, config_bytes)) = stored.iter().find(|(path, _)| path == "config.toml") else {
-        return Err(Error::Other("vault export is missing config.toml".into()));
+        return Err(Error::Other("keyring export is missing config.toml".into()));
     };
     let config_text = String::from_utf8(config_bytes.clone())
         .map_err(|_| Error::InvalidConfig("config.toml is not UTF-8".into()))?;
@@ -124,7 +124,7 @@ pub fn import_vault(file: &Path, destination: &Path) -> Result<(), Error> {
     for relative in &required {
         if !present.contains(relative.as_str()) {
             return Err(Error::Other(format!(
-                "vault export is missing {relative}, which config.toml names"
+                "keyring export is missing {relative}, which config.toml names"
             )));
         }
     }
@@ -140,7 +140,7 @@ pub fn import_vault(file: &Path, destination: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-pub fn copy_vault(source: &Path, destination: &Path) -> Result<(), Error> {
+pub fn copy_keyring(source: &Path, destination: &Path) -> Result<(), Error> {
     if destination.exists() {
         return Err(Error::Other(format!(
             "{} already exists",
@@ -195,7 +195,7 @@ fn walk(root: &Path, dir: &Path, found: &mut Vec<String>) -> Result<(), Error> {
             found.push(relative.to_owned());
         } else {
             return Err(Error::Other(format!(
-                "refusing to export: {relative} is in the vault but Wardlet does not recognize it"
+                "refusing to export: {relative} is in the keyring but Wardlet does not recognize it"
             )));
         }
     }
@@ -280,9 +280,9 @@ fn write_private(path: &Path, bytes: &[u8]) -> Result<(), Error> {
 mod tests {
     use std::fs;
 
-    use super::{allowed_path, export_vault, import_vault, output_directory};
-    use crate::vault::init_hardware_vault;
-    use crate::vault::members::HardwareMemberParams;
+    use super::{allowed_path, export_keyring, import_keyring, output_directory};
+    use crate::keyring::init_hardware_keyring;
+    use crate::keyring::members::HardwareMemberParams;
 
     struct TempDir(std::path::PathBuf);
 
@@ -303,7 +303,7 @@ mod tests {
         }
     }
 
-    fn sample_vault(dir: &std::path::Path) {
+    fn sample_keyring(dir: &std::path::Path) {
         let hmac = [0x11u8; 32];
         let params = HardwareMemberParams {
             credential_id: vec![1, 2, 3, 4],
@@ -313,18 +313,18 @@ mod tests {
             key_product: "YubiKey".into(),
             label: "desk".into(),
         };
-        init_hardware_vault(dir, "desk", &hmac, &params).unwrap();
+        init_hardware_keyring(dir, "desk", &hmac, &params).unwrap();
     }
 
     #[test]
-    fn export_then_import_round_trips_the_vault() {
+    fn export_then_import_round_trips_the_keyring() {
         let dir = TempDir::new();
-        let source = dir.0.join("vault");
-        sample_vault(&source);
-        let file = dir.0.join("vault.wardlet");
-        export_vault(&source, &file).unwrap();
+        let source = dir.0.join("keyring");
+        sample_keyring(&source);
+        let file = dir.0.join("keyring.wardlet");
+        export_keyring(&source, &file).unwrap();
         let restored = dir.0.join("restored");
-        import_vault(&file, &restored).unwrap();
+        import_keyring(&file, &restored).unwrap();
         let original = fs::read(source.join("config.toml")).unwrap();
         let copied = fs::read(restored.join("config.toml")).unwrap();
         assert_eq!(original, copied);
@@ -333,37 +333,37 @@ mod tests {
     }
 
     #[test]
-    fn import_refuses_an_existing_vault_and_a_bad_file() {
+    fn import_refuses_an_existing_keyring_and_a_bad_file() {
         let dir = TempDir::new();
-        let source = dir.0.join("vault");
-        sample_vault(&source);
-        let file = dir.0.join("vault.wardlet");
-        export_vault(&source, &file).unwrap();
-        let err = import_vault(&file, &source).unwrap_err();
-        assert!(matches!(err, crate::Error::VaultExists));
+        let source = dir.0.join("keyring");
+        sample_keyring(&source);
+        let file = dir.0.join("keyring.wardlet");
+        export_keyring(&source, &file).unwrap();
+        let err = import_keyring(&file, &source).unwrap_err();
+        assert!(matches!(err, crate::Error::KeyringExists));
 
         let junk = dir.0.join("notes.txt");
         fs::write(&junk, b"hello").unwrap();
-        let err = import_vault(&junk, &dir.0.join("other")).unwrap_err();
+        let err = import_keyring(&junk, &dir.0.join("other")).unwrap_err();
         let message = err.to_string();
-        assert!(message.contains("not a Wardlet vault export"));
+        assert!(message.contains("not a Wardlet keyring export"));
     }
 
     #[test]
     fn export_refuses_a_stray_file_and_import_refuses_a_missing_wrapper() {
         let dir = TempDir::new();
-        let source = dir.0.join("vault");
-        sample_vault(&source);
+        let source = dir.0.join("keyring");
+        sample_keyring(&source);
         fs::write(source.join("stray.txt"), b"what is this").unwrap();
-        let err = export_vault(&source, &dir.0.join("out.wardlet")).unwrap_err();
+        let err = export_keyring(&source, &dir.0.join("out.wardlet")).unwrap_err();
         assert!(err.to_string().contains("stray.txt"), "{err}");
         fs::remove_file(source.join("stray.txt")).unwrap();
 
         // Export, then hand-build a bundle missing the recovery wrapper.
-        let file = dir.0.join("vault.wardlet");
-        export_vault(&source, &file).unwrap();
+        let file = dir.0.join("keyring.wardlet");
+        export_keyring(&source, &file).unwrap();
         let restored = dir.0.join("restored");
-        import_vault(&file, &restored).unwrap();
+        import_keyring(&file, &restored).unwrap();
         let recovery = restored
             .join("keys")
             .read_dir()
@@ -374,8 +374,8 @@ mod tests {
             .unwrap();
         fs::remove_file(&recovery).unwrap();
         let broken = dir.0.join("broken.wardlet");
-        export_vault(&restored, &broken).unwrap();
-        let err = import_vault(&broken, &dir.0.join("again")).unwrap_err();
+        export_keyring(&restored, &broken).unwrap();
+        let err = import_keyring(&broken, &dir.0.join("again")).unwrap_err();
         assert!(err.to_string().contains("missing keys/"), "{err}");
         assert!(!dir.0.join("again").exists());
     }
@@ -383,11 +383,11 @@ mod tests {
     #[test]
     fn a_bare_filename_exports_into_the_current_directory() {
         assert_eq!(
-            output_directory(std::path::Path::new("vault.wardlet")),
+            output_directory(std::path::Path::new("keyring.wardlet")),
             std::path::Path::new(".")
         );
         assert_eq!(
-            output_directory(std::path::Path::new("out/vault.wardlet")),
+            output_directory(std::path::Path::new("out/keyring.wardlet")),
             std::path::Path::new("out")
         );
     }
