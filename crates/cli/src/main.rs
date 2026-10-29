@@ -23,11 +23,13 @@ use zeroize::Zeroize;
 Examples:
   wardlet init               First run. Create the keyring and enroll a FIDO2 key
   wardlet config             Add or remove a key
-  wardlet enc README.md      Encrypt a file, then ask before deleting it
-  wardlet enc -r ~/secrets   Encrypt every file in a directory
+  wardlet enc README.md      Lock a file in place (removes the original after verify)
+  wardlet enc --keep note.md Keep the plaintext beside the locked file
+  wardlet enc -r ~/secrets   Lock every file in a directory
   wardlet dec README.md.age  Decrypt a file
   wardlet edit notes.txt.age Edit a locked file in your editor, then encrypt it again
   wardlet new notes.txt      Create a locked file in your editor
+  wardlet index              List locked files this machine has recorded
   wardlet export keyring.wardlet
   wardlet import keyring.wardlet"
 )]
@@ -50,7 +52,7 @@ enum Command {
     Init,
     /// Add or remove a key.
     Config,
-    /// Encrypt files or directories.
+    /// Lock files or directories. Replaces the original after the ciphertext verifies.
     Enc {
         #[arg(required = true)]
         paths: Vec<PathBuf>,
@@ -60,9 +62,9 @@ enum Command {
         /// Write ciphertext under this directory instead of beside the source.
         #[arg(long)]
         output: Option<PathBuf>,
-        /// Delete the original files after every ciphertext verifies, without asking.
+        /// Leave the plaintext beside the locked file.
         #[arg(long)]
-        remove_source: bool,
+        keep: bool,
         /// Write ciphertext to standard output. The ciphertext is not verified.
         #[arg(long)]
         stdout: bool,
@@ -88,6 +90,12 @@ enum Command {
     Edit { file: PathBuf },
     /// Create a new locked file in your editor, then encrypt it.
     New { file: PathBuf },
+    /// List locked files recorded on this machine.
+    Index {
+        /// Drop entries whose files are missing, then list what remains.
+        #[arg(long)]
+        prune: bool,
+    },
     /// Show key-directory health without unlocking it.
     Status {
         #[arg(long)]
@@ -140,18 +148,10 @@ fn run(cli: Cli) -> Result<(), Error> {
             paths,
             recursive,
             output,
-            remove_source,
+            keep,
             stdout,
             force,
-        } => encrypt(
-            cli.dir,
-            &paths,
-            recursive,
-            output,
-            remove_source,
-            stdout,
-            force,
-        ),
+        } => encrypt(cli.dir, &paths, recursive, output, keep, stdout, force),
         Command::Dec {
             paths,
             recursive,
@@ -160,6 +160,7 @@ fn run(cli: Cli) -> Result<(), Error> {
         } => decrypt(cli.dir, &paths, recursive, output, force),
         Command::Edit { file } => edit(cli.dir, &file),
         Command::New { file } => new_file(cli.dir, &file),
+        Command::Index { prune } => index_cmd(cli.dir, prune),
         Command::Status { json } => status(cli.dir, json),
         Command::Keys { json } => keys(cli.dir, json),
         Command::Recover => recover(cli.dir),
@@ -583,34 +584,6 @@ fn print_warning_box(lines: &[&str]) {
     println!("╚{rule}╝");
 }
 
-fn confirm_delete_originals(actions: &[FileAction]) -> Result<bool, Error> {
-    use std::io::IsTerminal;
-    let count = actions
-        .iter()
-        .filter(|action| matches!(action, FileAction::Wrote { .. }))
-        .count();
-    if count == 0 || !io::stdin().is_terminal() {
-        return Ok(false);
-    }
-    let checked = if count == 1 {
-        "Checked 1 file. The encrypted copy matches the original.".to_owned()
-    } else {
-        format!("Checked {count} files. Each encrypted copy matches its original.")
-    };
-    println!();
-    println!("{checked}");
-    let sources = wrote_sources(actions);
-    let question = if let [only] = sources.as_slice() {
-        format!("Delete the original file {}?", only.display())
-    } else {
-        for source in &sources {
-            println!("{}", source.display());
-        }
-        "Delete these original files?".to_owned()
-    };
-    Ok(prompt_yes(&question))
-}
-
 fn confirm_recovery_saved() -> Result<bool, Error> {
     Ok(prompt_yes(
         "Please confirm you have saved your recovery code",
@@ -675,7 +648,7 @@ fn encrypt(
     paths: &[PathBuf],
     recursive: bool,
     output: Option<PathBuf>,
-    remove_source: bool,
+    keep: bool,
     stdout: bool,
     force: bool,
 ) -> Result<(), Error> {
@@ -686,15 +659,20 @@ fn encrypt(
     }
     let suffix = file_suffix(&dir);
     let stamp = keyring_stamp(&dir)?;
+    let version = stamp.version;
+    // Replace is the default. --stdout never deletes; --keep leaves plaintext.
+    let remove_source = !keep && !stdout;
     let request = ops::EncryptRequest {
         paths,
         recursive,
         output: output.as_deref(),
-        remove_source,
+        // Delete after report/index so a refused delete still leaves a clear trail.
+        remove_source: false,
         stdout,
         force,
         suffix: &suffix,
         stamp: Some(stamp),
+        keyring_dir: Some(&dir),
     };
     ops::preflight_encrypt(&request)?;
     let master = unlock_existing(&dir)?;
@@ -705,13 +683,58 @@ fn encrypt(
     }
     let actions = ops::encrypt_paths(&master, &request)?;
     report_actions(&actions, "encrypted");
+    record_locked(&dir, &master, version, &actions);
     if remove_source {
-        print_deleted(&actions);
-    } else if !stdout && confirm_delete_originals(&actions)? {
         ops::delete_sources(&actions)?;
         print_deleted(&actions);
     }
     Ok(())
+}
+
+fn index_cmd(dir: Option<PathBuf>, prune: bool) -> Result<(), Error> {
+    debug::log("listing the sealed file index");
+    let dir = keyring_dir(dir)?;
+    if !dir.join("config.toml").is_file() {
+        return Err(Error::KeyringNotFound);
+    }
+    let master = unlock_existing(&dir)?;
+    let entries = if prune {
+        let (kept, removed) = keyring::prune_index(&dir, &master)?;
+        if removed > 0 {
+            println!("Removed {removed} missing path(s).");
+        }
+        kept
+    } else {
+        keyring::load_index(&dir, &master)?
+    };
+    if entries.is_empty() {
+        println!("No locked files recorded on this machine yet.");
+        return Ok(());
+    }
+    for entry in &entries {
+        println!(
+            "{}  (keyring v{}, {})",
+            entry.path, entry.version, entry.locked_at
+        );
+    }
+    Ok(())
+}
+
+/// Best-effort: a failed index write must not undo a successful lock.
+fn record_locked(dir: &Path, master: &Master, version: u32, actions: &[FileAction]) {
+    let destinations: Vec<PathBuf> = actions
+        .iter()
+        .filter_map(|action| match action {
+            FileAction::Wrote { destination, .. } => Some(destination.clone()),
+            _ => None,
+        })
+        .collect();
+    if destinations.is_empty() {
+        return;
+    }
+    if let Err(err) = keyring::upsert_many(dir, master, &destinations, version) {
+        eprintln!("wardlet: warning: could not update the file index: {err}");
+    }
 }
 
 fn decrypt(
@@ -917,6 +940,7 @@ fn finish_editor_encrypt(
     }
 
     let stamp = keyring_stamp(dir)?;
+    let version = stamp.version;
     let encrypt_result = ops::encrypt_paths(
         master,
         &ops::EncryptRequest {
@@ -928,12 +952,14 @@ fn finish_editor_encrypt(
             force: true,
             suffix,
             stamp: Some(stamp),
+            keyring_dir: Some(dir),
         },
     );
     match encrypt_result {
-        Ok(_) => {
+        Ok(actions) => {
             let _ = std::fs::remove_dir_all(work);
             println!("{done} {}", ciphertext.display());
+            record_locked(dir, master, version, &actions);
             Ok(())
         }
         Err(err) => {
@@ -1156,6 +1182,7 @@ fn report_actions(actions: &[FileAction], verb: &str) {
             FileAction::Wrote {
                 source,
                 destination,
+                ..
             } => {
                 println!("{verb} {} -> {}", source.display(), destination.display());
             }
@@ -1273,6 +1300,7 @@ fn command_name(command: &Command) -> &'static str {
         Command::Dec { .. } => "dec",
         Command::Edit { .. } => "edit",
         Command::New { .. } => "new",
+        Command::Index { .. } => "index",
         Command::Status { .. } => "status",
         Command::Keys { .. } => "keys",
         Command::Recover => "recover",

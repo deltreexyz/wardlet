@@ -263,6 +263,13 @@ pub fn validate_config(config: &Config) -> Result<(), Error> {
     }
 
     let mut ids = HashSet::new();
+    crate::ops::validate_output_suffix(&config.settings.encryption_output_suffix).map_err(
+        |err| match err {
+            Error::InvalidConfig(message) => invalid(message),
+            other => other,
+        },
+    )?;
+
     for key in &config.keys {
         if key.id.len() != 32 || !key.id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(invalid(format!(
@@ -388,6 +395,12 @@ mod tests {
         config.epoch = 2;
         let err = load_config(&config.to_toml().unwrap()).unwrap_err();
         assert!(err.to_string().contains("missing version 1"), "{err}");
+
+        // Path-like encryption suffix.
+        let mut config = Config::new(&sample_recipient());
+        config.settings.encryption_output_suffix = "../x".into();
+        let err = load_config(&config.to_toml().unwrap()).unwrap_err();
+        assert!(err.to_string().contains("safe file extension"), "{err}");
     }
 
     #[test]

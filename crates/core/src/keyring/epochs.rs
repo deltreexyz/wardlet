@@ -214,6 +214,7 @@ mod tests {
                     keyring_id: "keyring".into(),
                     version,
                 }),
+                keyring_dir: None,
             },
         )
         .unwrap();

@@ -191,6 +191,9 @@ fn walk(root: &Path, dir: &Path, found: &mut Vec<String>) -> Result<(), Error> {
             .map_err(|_| Error::InvalidConfig("entry path is not valid UTF-8".into()))?
             .to_str()
             .ok_or_else(|| Error::Other(format!("{} has no file name", path.display())))?;
+        if local_only_path(relative) {
+            continue;
+        }
         if allowed_path(relative) {
             found.push(relative.to_owned());
         } else {
@@ -200,6 +203,11 @@ fn walk(root: &Path, dir: &Path, found: &mut Vec<String>) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+/// Host-local files that must not travel with export/import.
+fn local_only_path(path: &str) -> bool {
+    path == crate::keyring::index::FILE_NAME
 }
 
 fn allowed_path(path: &str) -> bool {
@@ -330,6 +338,20 @@ mod tests {
         assert_eq!(original, copied);
         assert!(restored.join("names.age").is_file());
         assert!(restored.join("keys").read_dir().unwrap().next().is_some());
+    }
+
+    #[test]
+    fn export_skips_the_local_file_index() {
+        let dir = TempDir::new();
+        let source = dir.0.join("keyring");
+        sample_keyring(&source);
+        fs::write(source.join(crate::keyring::index::FILE_NAME), b"sealed").unwrap();
+        let file = dir.0.join("keyring.wardlet");
+        export_keyring(&source, &file).unwrap();
+        let restored = dir.0.join("restored");
+        import_keyring(&file, &restored).unwrap();
+        assert!(!restored.join(crate::keyring::index::FILE_NAME).exists());
+        assert!(restored.join("config.toml").is_file());
     }
 
     #[test]

@@ -6,7 +6,7 @@
 
 Your key is the lock.
 
-Wardlet locks files with the security keys you already own. The locked copy sits next to the original, and nothing opens it without your key. No password, no account, no upload.
+Wardlet locks files with the security keys you already own. A locked file replaces the original in place, and nothing opens it without your key. No password, no account, no upload.
 
 Free and open source. A command-line tool for Linux today, with a desktop app later that opens the same files.
 
@@ -32,7 +32,7 @@ Then:
 
 ```bash
 wardlet init               # register your keys, get a one-time recovery code
-wardlet enc taxes.pdf      # writes taxes.pdf.age beside the original
+wardlet enc taxes.pdf      # locks in place as taxes.pdf.age
 wardlet dec taxes.pdf.age  # tap a key to open
 ```
 
@@ -49,7 +49,7 @@ Good for: SSH keys, `.env` files, tax documents, password-manager exports, scans
 ## How it works
 
 1. **Set up with your keys.** `wardlet init` adds your first security key and shows a recovery code once. Save it. Add more keys later so a lost key is not the end.
-2. **enc — lock a file.** `wardlet enc taxes.pdf` writes a locked copy beside the original, in the same folder. You decide when to delete the original. Files stay where they are.
+2. **enc — lock a file.** `wardlet enc taxes.pdf` replaces it with `taxes.pdf.age` in the same folder.
 3. **dec — tap to open.** `wardlet dec taxes.pdf.age` — plug in a key and tap it. Without a key, the file can't be read.
 
 > **Changing keys creates a new recovery code.** Adding or removing a key shows a new recovery code once. Store it before you close the terminal. The old recovery code can still open files locked before the change. The new code opens files locked after it, and can open earlier files through the current keyring.
@@ -57,7 +57,7 @@ Good for: SSH keys, `.env` files, tax documents, password-manager exports, scans
 ## Why it's different
 
 - **Your keys, not a password.** Nothing to invent, type or forget. Works with YubiKey, Trezor and similar FIDO2 keys. Add more than one.
-- **Files stay where they are.** No mounted drive, no container, no sync conflicts.
+- **Files stay where they are.** A locked file replaces the original in place. No mounted drive, no container, no sync conflicts.
 - **Several keys, one lock.** Any key you add opens the files. Adding a key doesn't rewrite them.
 - **A recovery code, shown once.** The way back in if every key is lost. Wardlet keeps no copy.
 - **Nothing leaves your machine.** No account, no cloud, no upload.
@@ -73,14 +73,18 @@ Good for: SSH keys, `.env` files, tax documents, password-manager exports, scans
 
 An existing locked file is not overwritten unless you pass `--force`.
 
+`wardlet index` lists locked files this machine has recorded (newest first). `wardlet index --prune` drops paths whose files are gone. The index is local to the computer and is not included in keyring exports.
+
 ## FAQ
 
 **How is this different from age plus a FIDO plugin?**
-Underneath, Wardlet uses the age format and FIDO2 hmac-secret — the same building blocks as plugins like `age-plugin-fido2-hmac`. The difference is the product around them: Wardlet enrolls several keys and a recovery code in one keyring, locks files beside the originals, and lets you add a key without rewriting existing locked files. If you already live in the `age` CLI and manage recipients yourself, a plugin may be enough. Wardlet is for people who want that workflow packaged.
+Underneath, Wardlet uses the age format and FIDO2 hmac-secret — the same building blocks as plugins like `age-plugin-fido2-hmac`. The difference is the product around them: Wardlet enrolls several keys and a recovery code in one keyring, locks files in place, and lets you add a key without rewriting existing locked files. If you already live in the `age` CLI and manage recipients yourself, a plugin may be enough. Wardlet is for people who want that workflow packaged.
+
+**Where did I put that locked file?**
+`wardlet index` prints paths this machine recorded when you locked a file. It needs a key tap. Paths are host-specific; another computer keeps its own list.
 
 **What are the limits?**
 - You need compatible FIDO2 keys. Older keys (YubiKey 4, Trezor One, and similar) are not supported. See [wardlet.com/#devices](https://wardlet.com/#devices).
-- The original file stays until you delete it.
 - Removing a key does not rewrite files already locked. See the next question.
 - Wardlet does not protect against malware running as you while a file is decrypted or open in an editor.
 - Linux CLI today. Packaged downloads and other platforms come later.

@@ -8,6 +8,10 @@ First public release.
   that unlock files in place). Default path is `~/.config/wardlet/keyring`,
   config field `keyring_id`, export marker `WARDLET-KEYRING`. Pre-release
   test installs under `…/vault` are not migrated—delete and run `init` again.
+- `wardlet enc` replaces the original after the ciphertext verifies. Pass
+  `--keep` to leave the plaintext. GUI lock does the same.
+- Sealed local file index (`index.age`): `wardlet index` / `--prune` lists
+  paths recorded after lock. Skipped on export/import.
 - Early Linux GUI (`wardlet-gui`) links the same core library as the CLI:
   set up a keyring, lock a file, open a locked file.
 - Encrypt and decrypt files where they are (`wardlet enc`, `wardlet dec`),

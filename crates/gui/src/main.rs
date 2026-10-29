@@ -304,12 +304,19 @@ fn run_encrypt(
         force: false,
         suffix: ".age",
         stamp,
+        keyring_dir: Some(dir),
     };
     wardlet_core::ops::preflight_encrypt(&request)?;
     let actions = encrypt_paths(&master, &request)?;
+    if let Some(wardlet_core::ops::FileAction::Wrote { destination, .. }) = actions.first() {
+        if let Err(err) = keyring::upsert(dir, &master, destination, version) {
+            eprintln!("wardlet-gui: warning: could not update the file index: {err}");
+        }
+    }
+    wardlet_core::ops::delete_sources(&actions)?;
     let message = match actions.first() {
         Some(wardlet_core::ops::FileAction::Wrote { destination, .. }) => {
-            format!("Locked copy: {}", destination.display())
+            format!("Locked {}", destination.display())
         }
         _ => "Locked.".into(),
     };

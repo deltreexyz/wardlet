@@ -1,13 +1,16 @@
 //! Encrypt and decrypt the paths a person names.
 //!
-//! The keyring does not keep a list of files. Ciphertext is an age file beside
-//! the source, or under `--output`. The master stays in memory for this call.
+//! Ciphertext is an age file beside the source, or under `--output`. By default
+//! the caller deletes the plaintext after every ciphertext in the batch
+//! verifies (`remove_source`). A sealed file index lives in the keyring crate,
+//! not here. The master stays in memory for this call.
 
 use std::collections::HashSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::time::SystemTime;
 
 use age::x25519::{Identity, Recipient};
 use age::{Decryptor, Encryptor};
@@ -36,6 +39,8 @@ pub struct EncryptRequest<'a> {
     pub force: bool,
     pub suffix: &'a str,
     pub stamp: Option<FileStamp>,
+    /// Refuse to lock files inside this directory (the keyring itself).
+    pub keyring_dir: Option<&'a Path>,
 }
 
 pub struct DecryptRequest<'a> {
@@ -46,11 +51,24 @@ pub struct DecryptRequest<'a> {
     pub suffix: &'a str,
 }
 
+/// Identity of a source file when it was locked. Used to refuse deleting a
+/// plaintext that changed after it was read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceId {
+    len: u64,
+    modified: Option<SystemTime>,
+    #[cfg(unix)]
+    dev: u64,
+    #[cfg(unix)]
+    ino: u64,
+}
+
 #[derive(Debug)]
 pub enum FileAction {
     Wrote {
         source: PathBuf,
         destination: PathBuf,
+        source_id: Option<SourceId>,
     },
     Skipped {
         source: PathBuf,
@@ -66,10 +84,10 @@ pub fn encrypt_paths(
 ) -> Result<Vec<FileAction>, Error> {
     if request.stdout && request.remove_source {
         return Err(Error::Other(
-            "--remove-source cannot be used with --stdout".into(),
+            "cannot delete originals when writing ciphertext to --stdout".into(),
         ));
     }
-    let suffix = normalize_suffix(request.suffix);
+    let suffix = validate_output_suffix(request.suffix)?;
     let jobs = collect(request.paths, request.recursive, &suffix, true)?;
     if request.stdout && jobs.iter().filter(|job| !job.skip).count() != 1 {
         return Err(Error::Other("--stdout encrypts exactly one file".into()));
@@ -80,20 +98,40 @@ pub fn encrypt_paths(
             actions.push(FileAction::Skipped { source: job.source });
             continue;
         }
+        if let Some(keyring) = request.keyring_dir {
+            if let Err(err) = refuse_keyring_path(&job.source, keyring) {
+                return Err(annotate_partial(&actions, err));
+            }
+        }
         if request.stdout {
-            encrypt_to_stdout(master, &job.source, request.stamp.as_ref())?;
+            if let Err(err) = encrypt_to_stdout(master, &job.source, request.stamp.as_ref()) {
+                return Err(annotate_partial(&actions, err));
+            }
             actions.push(FileAction::ToStdout { source: job.source });
             continue;
         }
-        let destination = destination_path(&job, &suffix, request.output, true)?;
+        let destination = match destination_path(&job, &suffix, request.output, true) {
+            Ok(path) => path,
+            Err(err) => return Err(annotate_partial(&actions, err)),
+        };
+        if let Some(keyring) = request.keyring_dir
+            && let Err(err) = refuse_keyring_path(&destination, keyring)
+        {
+            return Err(annotate_partial(&actions, err));
+        }
         if destination.exists() && !request.force {
-            return Err(Error::Collision);
+            return Err(annotate_partial(&actions, Error::Collision));
         }
         warn_if_newer_than_ciphertext(&job.source, &destination);
-        encrypt_one(master, &job.source, &destination, request.stamp.as_ref())?;
+        let source_id = match encrypt_one(master, &job.source, &destination, request.stamp.as_ref())
+        {
+            Ok(id) => id,
+            Err(err) => return Err(annotate_partial(&actions, err)),
+        };
         actions.push(FileAction::Wrote {
             source: job.source,
             destination,
+            source_id: Some(source_id),
         });
     }
     if request.remove_source {
@@ -103,13 +141,56 @@ pub fn encrypt_paths(
 }
 
 /// Remove plaintext files after every ciphertext in this command has been verified.
+/// Skips (and reports) any original that changed after it was locked.
 pub fn delete_sources(actions: &[FileAction]) -> Result<(), Error> {
+    let mut problems = Vec::new();
     for action in actions {
-        if let FileAction::Wrote { source, .. } = action {
-            fs::remove_file(source).map_err(Error::io)?;
+        let FileAction::Wrote {
+            source,
+            destination,
+            source_id,
+        } = action
+        else {
+            continue;
+        };
+        let Some(expected) = source_id else {
+            problems.push(format!(
+                "{}: missing lock fingerprint; left in place (locked copy at {})",
+                source.display(),
+                destination.display()
+            ));
+            continue;
+        };
+        match source_identity(source) {
+            Ok(current) if current == *expected => {
+                if let Err(err) = fs::remove_file(source) {
+                    problems.push(format!(
+                        "{}: could not delete ({err}); locked copy at {}",
+                        source.display(),
+                        destination.display()
+                    ));
+                }
+            }
+            Ok(_) => problems.push(format!(
+                "{} changed after it was locked; left in place (locked copy at {})",
+                source.display(),
+                destination.display()
+            )),
+            Err(err) => problems.push(format!(
+                "{}: {err}; locked copy at {}",
+                source.display(),
+                destination.display()
+            )),
         }
     }
-    Ok(())
+    if problems.is_empty() {
+        return Ok(());
+    }
+    Err(Error::Other(format!(
+        "did not delete {} original(s):\n{}",
+        problems.len(),
+        problems.join("\n")
+    )))
 }
 
 /// Check an encrypt command before any key is touched: paths exist and two
@@ -117,17 +198,23 @@ pub fn delete_sources(actions: &[FileAction]) -> Result<(), Error> {
 pub fn preflight_encrypt(request: &EncryptRequest<'_>) -> Result<(), Error> {
     if request.stdout && request.remove_source {
         return Err(Error::Other(
-            "--remove-source cannot be used with --stdout".into(),
+            "cannot delete originals when writing ciphertext to --stdout".into(),
         ));
     }
-    let suffix = normalize_suffix(request.suffix);
+    let suffix = validate_output_suffix(request.suffix)?;
     let jobs = collect(request.paths, request.recursive, &suffix, true)?;
     let mut destinations: HashSet<PathBuf> = HashSet::new();
     for job in jobs.iter().filter(|job| !job.skip) {
+        if let Some(keyring) = request.keyring_dir {
+            refuse_keyring_path(&job.source, keyring)?;
+        }
         if request.stdout {
             continue;
         }
         let destination = destination_path(job, &suffix, request.output, true)?;
+        if let Some(keyring) = request.keyring_dir {
+            refuse_keyring_path(&destination, keyring)?;
+        }
         if !destinations.insert(destination.clone()) {
             return Err(Error::Other(format!(
                 "two files would both be written to {}",
@@ -194,6 +281,7 @@ pub fn decrypt_keyring(
         actions.push(FileAction::Wrote {
             source: job.source,
             destination,
+            source_id: None,
         });
     }
     Ok(actions)
@@ -346,8 +434,9 @@ fn encrypt_one(
     source: &Path,
     destination: &Path,
     stamp: Option<&FileStamp>,
-) -> Result<(), Error> {
+) -> Result<SourceId, Error> {
     notice_if_large(source);
+    let source_id = source_identity(source)?;
     if let Some(parent) = destination
         .parent()
         .filter(|path| !path.as_os_str().is_empty())
@@ -357,7 +446,7 @@ fn encrypt_one(
     let partial = partial_path(destination);
     let mut output = create_private_file(&partial)?;
     let write_result = (|| -> Result<Vec<u8>, Error> {
-        let mut input = File::open(source).map_err(Error::io)?;
+        let mut input = open_source(source)?;
         let plain_hash = encrypt_reader(master, &mut input, &mut output, stamp)?;
         output.sync_all().map_err(Error::io)?;
         Ok(plain_hash)
@@ -382,7 +471,7 @@ fn encrypt_one(
         let _ = fs::remove_file(&partial);
         return Err(err);
     }
-    Ok(())
+    Ok(source_id)
 }
 
 fn encrypt_to_stdout(
@@ -391,7 +480,7 @@ fn encrypt_to_stdout(
     stamp: Option<&FileStamp>,
 ) -> Result<(), Error> {
     notice_if_large(source);
-    let mut input = File::open(source).map_err(Error::io)?;
+    let mut input = open_source(source)?;
     let mut output = io::stdout().lock();
     encrypt_reader(master, &mut input, &mut output, stamp)?;
     Ok(())
@@ -645,6 +734,134 @@ fn normalize_suffix(suffix: &str) -> String {
     }
 }
 
+/// Suffix must be a simple extension (e.g. `.age`), never a path fragment.
+pub fn validate_output_suffix(suffix: &str) -> Result<String, Error> {
+    let normalized = normalize_suffix(suffix);
+    if normalized == "." || normalized.len() < 2 {
+        return Err(Error::InvalidConfig(
+            "encryption_output_suffix must be a file extension like .age".into(),
+        ));
+    }
+    let rest = &normalized[1..];
+    if rest.is_empty()
+        || !rest
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return Err(Error::InvalidConfig(format!(
+            "encryption_output_suffix {normalized:?} is not a safe file extension"
+        )));
+    }
+    Ok(normalized)
+}
+
+fn source_identity(path: &Path) -> Result<SourceId, Error> {
+    let meta = fs::symlink_metadata(path).map_err(Error::io)?;
+    if meta.file_type().is_symlink() {
+        return Err(Error::Other(format!(
+            "refusing to follow symlink {}",
+            path.display()
+        )));
+    }
+    if !meta.is_file() {
+        return Err(Error::Other(format!("{} is not a file", path.display())));
+    }
+    Ok(SourceId {
+        len: meta.len(),
+        modified: meta.modified().ok(),
+        #[cfg(unix)]
+        dev: {
+            use std::os::unix::fs::MetadataExt;
+            meta.dev()
+        },
+        #[cfg(unix)]
+        ino: {
+            use std::os::unix::fs::MetadataExt;
+            meta.ino()
+        },
+    })
+}
+
+fn open_source(path: &Path) -> Result<File, Error> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        use std::io::ErrorKind;
+        match OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(path)
+        {
+            Ok(file) => Ok(file),
+            Err(err) if err.raw_os_error() == Some(libc::ELOOP) => Err(Error::Other(format!(
+                "refusing to follow symlink {}",
+                path.display()
+            ))),
+            Err(err) if err.kind() == ErrorKind::InvalidInput => Err(Error::Other(format!(
+                "refusing to follow symlink {}",
+                path.display()
+            ))),
+            Err(err) => Err(Error::io(err)),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let meta = fs::symlink_metadata(path).map_err(Error::io)?;
+        if meta.file_type().is_symlink() {
+            return Err(Error::Other(format!(
+                "refusing to follow symlink {}",
+                path.display()
+            )));
+        }
+        File::open(path).map_err(Error::io)
+    }
+}
+
+fn refuse_keyring_path(path: &Path, keyring: &Path) -> Result<(), Error> {
+    let keyring_abs = absolute_existing(keyring).or_else(|_| absolute_path(keyring))?;
+    let path_abs = if path.exists() {
+        absolute_existing(path)?
+    } else {
+        absolute_path(path)?
+    };
+    if path_abs == keyring_abs || path_abs.starts_with(&keyring_abs) {
+        return Err(Error::Other(format!(
+            "refusing to lock files inside the keyring directory {}",
+            keyring.display()
+        )));
+    }
+    Ok(())
+}
+
+fn absolute_path(path: &Path) -> Result<PathBuf, Error> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir().map_err(Error::io)?.join(path))
+    }
+}
+
+fn absolute_existing(path: &Path) -> Result<PathBuf, Error> {
+    fs::canonicalize(path).map_err(Error::io)
+}
+
+fn annotate_partial(actions: &[FileAction], err: Error) -> Error {
+    let locked: Vec<String> = actions
+        .iter()
+        .filter_map(|action| match action {
+            FileAction::Wrote { destination, .. } => Some(destination.display().to_string()),
+            _ => None,
+        })
+        .collect();
+    if locked.is_empty() {
+        return err;
+    }
+    Error::Other(format!(
+        "{err}\nAlready locked (originals kept): {}\nRe-run with --force to replace those locked files.",
+        locked.join(", ")
+    ))
+}
+
 fn create_private_file(path: &Path) -> Result<File, Error> {
     if let Ok(meta) = fs::symlink_metadata(path) {
         if meta.file_type().is_symlink() {
@@ -726,6 +943,7 @@ mod tests {
                 force,
                 suffix: ".age",
                 stamp: None,
+                keyring_dir: None,
             },
         )
         .unwrap()
@@ -753,6 +971,7 @@ mod tests {
             force: false,
             suffix: ".age",
             stamp: None,
+            keyring_dir: None,
         })
         .unwrap_err();
         assert!(err.to_string().contains("both be written"), "{err}");
@@ -784,6 +1003,7 @@ mod tests {
             force: false,
             suffix: ".age",
             stamp: None,
+            keyring_dir: None,
         })
         .unwrap_err();
         assert!(matches!(err, crate::Error::Collision), "{err}");
@@ -811,6 +1031,7 @@ mod tests {
                 force: false,
                 suffix: ".age",
                 stamp: None,
+                keyring_dir: None,
             },
         )
         .unwrap_err();
@@ -934,6 +1155,7 @@ mod tests {
                 force: false,
                 suffix: ".age",
                 stamp: None,
+                keyring_dir: None,
             },
         )
         .unwrap_err();
@@ -962,6 +1184,7 @@ mod tests {
                 force: false,
                 suffix: ".age",
                 stamp: None,
+                keyring_dir: None,
             },
         )
         .unwrap_err();
@@ -989,6 +1212,7 @@ mod tests {
                 force: false,
                 suffix: ".age",
                 stamp: None,
+                keyring_dir: None,
             },
         )
         .unwrap_err();
@@ -1044,6 +1268,7 @@ mod tests {
                 force: false,
                 suffix: ".age",
                 stamp: None,
+                keyring_dir: None,
             },
         )
         .unwrap_err();
@@ -1061,6 +1286,7 @@ mod tests {
                 force: false,
                 suffix: ".age",
                 stamp: None,
+                keyring_dir: None,
             },
         )
         .unwrap();
@@ -1093,6 +1319,7 @@ mod tests {
                 force: false,
                 suffix: ".age",
                 stamp: None,
+                keyring_dir: None,
             },
         )
         .unwrap_err();
@@ -1136,12 +1363,80 @@ mod tests {
                 force: true,
                 suffix: ".age",
                 stamp: None,
+                keyring_dir: None,
             },
         )
         .unwrap_err();
-        assert!(matches!(err, crate::Error::Io(_)));
+        let message = err.to_string();
+        assert!(
+            message.contains("Already locked") && message.contains("keep.txt.age"),
+            "{message}"
+        );
         assert_eq!(fs::read(&source).unwrap(), b"still here");
         assert_eq!(fs::read(&blocked).unwrap(), b"also here");
         assert!(dir.0.join("keep.txt.age").is_file());
+    }
+
+    #[test]
+    fn refuses_to_lock_files_inside_the_keyring_directory() {
+        let dir = TempDir::new();
+        let keyring = dir.0.join("keyring");
+        fs::create_dir_all(&keyring).unwrap();
+        let inside = keyring.join("config.toml");
+        fs::write(&inside, b"do not lock me").unwrap();
+        let err = preflight_encrypt(&EncryptRequest {
+            paths: std::slice::from_ref(&inside),
+            recursive: false,
+            output: None,
+            remove_source: false,
+            stdout: false,
+            force: false,
+            suffix: ".age",
+            stamp: None,
+            keyring_dir: Some(&keyring),
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("keyring directory"), "{err}");
+        assert!(inside.is_file());
+    }
+
+    #[test]
+    fn refuses_to_delete_an_original_that_changed_after_lock() {
+        let dir = TempDir::new();
+        let source = dir.0.join("live.txt");
+        fs::write(&source, b"first").unwrap();
+        let master = Master::generate();
+        let actions = encrypt_paths(
+            &master,
+            &EncryptRequest {
+                paths: std::slice::from_ref(&source),
+                recursive: false,
+                output: None,
+                remove_source: false,
+                stdout: false,
+                force: false,
+                suffix: ".age",
+                stamp: None,
+                keyring_dir: None,
+            },
+        )
+        .unwrap();
+        assert!(dir.0.join("live.txt.age").is_file());
+        // Simulate a concurrent write after encrypt, before delete.
+        fs::write(&source, b"first-and-more").unwrap();
+        let err = super::delete_sources(&actions).unwrap_err();
+        assert!(err.to_string().contains("changed after it was locked"), "{err}");
+        assert_eq!(fs::read(&source).unwrap(), b"first-and-more");
+        assert!(dir.0.join("live.txt.age").is_file());
+    }
+
+    #[test]
+    fn output_suffix_must_be_a_simple_extension() {
+        assert!(super::validate_output_suffix(".age").is_ok());
+        assert!(super::validate_output_suffix("age").is_ok());
+        let err = super::validate_output_suffix("../x").unwrap_err();
+        assert!(err.to_string().contains("safe file extension"), "{err}");
+        let err = super::validate_output_suffix(".age/../evil").unwrap_err();
+        assert!(err.to_string().contains("safe file extension"), "{err}");
     }
 }

@@ -12,6 +12,7 @@ use crate::master::Master;
 pub mod bundle;
 pub mod epochs;
 pub mod format;
+pub mod index;
 pub mod keys;
 pub mod members;
 pub(crate) mod names;
@@ -19,6 +20,7 @@ pub(crate) mod names;
 pub use bundle::{copy_keyring, export_keyring, import_keyring};
 pub use epochs::{is_latest_master, masters_covering, rotate_keyring};
 pub use format::{Config, FORMAT_VERSION, load_config, keyring_version};
+pub use index::{IndexEntry, upsert, upsert_many, prune as prune_index, load as load_index};
 pub use members::{
     DEFAULT_RP_ID, FIDO2_MECHANISM, HardwareMemberParams, MemberInfo, RECOVERY_MECHANISM,
     add_hardware_member_unlocked, commit_recovery_wrapper, has_hardware_member,
